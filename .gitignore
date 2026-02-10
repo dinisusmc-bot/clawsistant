@@ -1,0 +1,28 @@
+# Secrets - DO NOT COMMIT
+.env
+secrets/
+*.pem
+*.key
+credentials/
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Cache
+.cache/
+tmp/
+temp/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
