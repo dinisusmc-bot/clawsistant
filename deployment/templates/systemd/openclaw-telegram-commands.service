@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenClaw Telegram Task Commands
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw/workspace
+EnvironmentFile=-%h/.telegram-env
+ExecStart=/usr/bin/python3 %h/.openclaw/workspace/telegram-task-commands.py
+StandardOutput=append:%h/.openclaw/workspace/telegram-task-commands.log
+StandardError=append:%h/.openclaw/workspace/telegram-task-commands.log
+
+[Install]
+WantedBy=default.target

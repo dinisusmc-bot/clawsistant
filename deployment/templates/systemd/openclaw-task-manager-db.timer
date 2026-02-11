@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenClaw Autonomous Task Manager Timer (DB)
+Requires=openclaw-task-manager-db.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

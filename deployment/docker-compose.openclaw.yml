@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  # OpenClaw PostgreSQL Database
+  openclaw-postgres:
+    image: pgvector/pgvector:pg15
+    container_name: openclaw-postgres
+    environment:
+      POSTGRES_USER: ${OPENCLAW_POSTGRES_USER:-openclaw}
+      POSTGRES_PASSWORD: ${OPENCLAW_POSTGRES_PASSWORD:-openclaw_dev_pass}
+      POSTGRES_DB: ${OPENCLAW_POSTGRES_DB:-openclaw}
+    ports:
+      - "${OPENCLAW_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - openclaw_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OPENCLAW_POSTGRES_USER:-openclaw}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  openclaw_postgres_data:
+    name: openclaw_postgres_data

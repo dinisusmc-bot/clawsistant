@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenClaw Telegram Task Commands Timer
+Requires=openclaw-telegram-commands.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

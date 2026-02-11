@@ -1,0 +1,213 @@
+{
+  "meta": {
+    "lastTouchedVersion": "__OPENCLAW_VERSION__",
+    "lastTouchedAt": "__GENERATED_AT__"
+  },
+  "env": {
+    "OPENAI_API_KEY": "__OPENAI_API_KEY__",
+    "OPENAI_BASE_URL": "__OPENAI_BASE_URL__",
+    "GMAIL_TOKEN": ""
+  },
+  "wizard": {
+    "lastRunAt": "__GENERATED_AT__",
+    "lastRunVersion": "__OPENCLAW_VERSION__",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "models": {
+    "providers": {
+      "litellm": {
+        "baseUrl": "__OPENAI_BASE_URL__",
+        "apiKey": "__OPENAI_API_KEY__",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "qwen3-coder",
+            "name": "Primary Text Model",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 220000,
+            "maxTokens": 200000
+          },
+          {
+            "id": "internvl",
+            "name": "Primary Vision Model",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 32768,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "litellm/qwen3-coder"
+      },
+      "imageModel": {
+        "primary": "litellm/internvl"
+      },
+      "workspace": "__HOME__/.openclaw/workspace",
+      "memorySearch": {
+        "enabled": true,
+        "sources": [
+          "memory",
+          "sessions"
+        ],
+        "extraPaths": [
+          "__HOME__/.openclaw/memory/notes"
+        ],
+        "provider": "openai",
+        "model": "bge-small-en-v1.5",
+        "sync": {
+          "onSessionStart": true,
+          "onSearch": true,
+          "watch": true,
+          "watchDebounceMs": 5000,
+          "intervalMinutes": 60
+        },
+        "query": {
+          "maxResults": 8,
+          "minScore": 0.2,
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "textWeight": 0.3
+          }
+        }
+      },
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    },
+    "list": [
+      {
+        "id": "planner",
+        "default": true,
+        "name": "Planner/Delegator",
+        "subagents": {
+          "allowAgents": [
+            "coder",
+            "tester"
+          ]
+        }
+      },
+      {
+        "id": "coder",
+        "name": "Coder"
+      },
+      {
+        "id": "tester",
+        "name": "Tester"
+      }
+    ]
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto"
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "session-memory": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "botToken": "__TELEGRAM_BOT_TOKEN__",
+      "allowFrom": [
+        "__TELEGRAM_ALLOW_FROM__"
+      ],
+      "groupPolicy": "allowlist",
+      "streamMode": "partial"
+    }
+  },
+  "gateway": {
+    "port": __OPENCLAW_GATEWAY_PORT__,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "__OPENCLAW_GATEWAY_TOKEN__"
+    },
+    "tailscale": {
+      "mode": "serve",
+      "resetOnExit": false
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "calendar.add",
+        "contacts.add",
+        "reminders.add"
+      ]
+    }
+  },
+  "skills": {
+    "load": {
+      "extraDirs": [
+        "__HOME__/projects/agent-skills/skills"
+      ]
+    },
+    "install": {
+      "nodeManager": "npm"
+    },
+    "entries": {
+      "github": {
+        "enabled": false
+      },
+      "obsidian": {
+        "enabled": false
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "telegram": {
+        "enabled": true
+      },
+      "discord": {
+        "enabled": false
+      },
+      "llm-task": {
+        "enabled": true
+      },
+      "lobster": {
+        "enabled": true
+      }
+    }
+  }
+}

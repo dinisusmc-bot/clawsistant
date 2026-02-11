@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart="/usr/bin/node" "__OPENCLAW_CLI__" gateway --port __OPENCLAW_GATEWAY_PORT__
+Restart=always
+RestartSec=5
+KillMode=process
+Environment="OPENAI_API_KEY=__OPENAI_API_KEY__"
+Environment="OPENAI_BASE_URL=__OPENAI_BASE_URL__"
+Environment=HOME=__HOME__
+Environment="PATH=__PATH__"
+Environment=OPENCLAW_GATEWAY_PORT=__OPENCLAW_GATEWAY_PORT__
+Environment=OPENCLAW_GATEWAY_TOKEN=__OPENCLAW_GATEWAY_TOKEN__
+Environment="OPENCLAW_SYSTEMD_UNIT=openclaw-gateway.service"
+Environment=OPENCLAW_SERVICE_MARKER=openclaw
+Environment=OPENCLAW_SERVICE_KIND=gateway
+Environment=OPENCLAW_SERVICE_VERSION=__OPENCLAW_VERSION__
+
+[Install]
+WantedBy=default.target
