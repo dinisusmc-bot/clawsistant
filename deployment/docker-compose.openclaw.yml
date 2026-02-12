@@ -20,6 +20,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # Lightweight DB UI for viewing tasks
+  openclaw-db-ui:
+    image: adminer:4
+    container_name: openclaw-db-ui
+    depends_on:
+      - openclaw-postgres
+    environment:
+      ADMINER_DEFAULT_SERVER: openclaw-postgres
+    ports:
+      - "${OPENCLAW_DB_UI_PORT:-8080}:8080"
+    restart: unless-stopped
+
 volumes:
   openclaw_postgres_data:
     name: openclaw_postgres_data
