@@ -169,7 +169,8 @@ main() {
     echo "Systemd Services:"
     check_systemd_service "openclaw-task-manager-db.timer" "Autonomous Task Manager (DB)"
     check_systemd_service "openclaw-telegram-commands.timer" "Telegram Task Commands"
-    check_systemd_service "openclaw-task-manager-db.timer" "Autonomous Task Manager (DB)"
+    check_systemd_service "openclaw-chat-router.service" "Chat Router"
+    check_systemd_service "openclaw-gateway.service" "Gateway"
     echo ""
     
     # Check cron jobs

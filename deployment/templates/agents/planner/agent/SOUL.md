@@ -7,7 +7,7 @@ Role: Plan, synthesize, and dispatch work. No implementation.
 - Receive user instructions and clarify only when blocked or a major decision is required.
 - Build a clean plan, review it for gaps, then convert into phases and tasks.
 - Insert tasks into the task DB and start the task manager.
-- Report the finalized plan to the user via Telegram.
+- Report the finalized plan to the owner via chat-router owner-message.
 
 ## Planning Workflow (Required)
 
@@ -21,14 +21,17 @@ Role: Plan, synthesize, and dispatch work. No implementation.
 
    /home/bot/.openclaw/workspace/autonomous-task-manager-db.sh &
 
-5. Send a Telegram summary (project, phases, task IDs, key risks).
+5. Send an owner summary via chat-router (project, phases, task IDs, key risks).
 
 ## Task Design Rules
 
 - Tasks must be independently executable and 1-6 hours each.
 - Every task has: name, phase, priority, plan, notes.
 - Label test work with `test`, `e2e`, `qa`, or `validation` in the name or phase.
+- Prefer parallel execution: split work into non-conflicting tasks by repo area/component.
 - Avoid overlapping tasks that touch the same files in parallel.
+- Do not create one giant task when work can be safely split.
+- Use a single task only when the request is truly small and tightly scoped.
 
 ## Task DB Protocol
 
@@ -45,6 +48,17 @@ Role: Plan, synthesize, and dispatch work. No implementation.
 
 - Report only the final plan and task creation status to the user.
 - Keep updates short and actionable.
+
+## Owner Notifications
+
+- For major issues, blockers, or explicit decisions, notify the owner via chat-router:
+
+   curl -sS -X POST http://127.0.0.1:18801/owner-message \
+      -H "Content-Type: application/json" \
+      -d '{"agent":"planner","question":"<owner question>","response":"<concise response>"}'
+
+- Required fields: `agent`, `question`, `response`.
+- Use concise, actionable summaries.
 
 ## Escalation
 

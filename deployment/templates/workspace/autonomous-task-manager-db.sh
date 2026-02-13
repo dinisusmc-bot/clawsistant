@@ -24,17 +24,33 @@ TELEGRAM_NOTIFY="$HOME/.openclaw/workspace/telegram-notify.sh"
 MAX_PARALLEL_CODER=${MAX_PARALLEL_CODER:-3}
 MAX_PARALLEL_TESTER=${MAX_PARALLEL_TESTER:-1}
 AGENT_TIMEOUT=${AGENT_TIMEOUT:-3600}
+TESTER_TIMEOUT=${TESTER_TIMEOUT:-2400}
+TESTER_STEP_TIMEOUT=${TESTER_STEP_TIMEOUT:-600}
+TESTER_MAX_ATTEMPTS=${TESTER_MAX_ATTEMPTS:-3}
 STALE_SECONDS=${STALE_SECONDS:-7200}
+MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 BLOCKED_DIGEST_INTERVAL_SEC=${BLOCKED_DIGEST_INTERVAL_SEC:-21600}
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+COMPLETED_RETENTION_DAYS=${COMPLETED_RETENTION_DAYS:-7}
+LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+VERBOSE_TASK_LOGS=${VERBOSE_TASK_LOGS:-0}
+TASK_HEARTBEAT_SEC=${TASK_HEARTBEAT_SEC:-60}
+TASK_MANAGER_LOG="$LOG_DIR/task-manager.log"
+TEST_CLEANUP_AFTER=${TEST_CLEANUP_AFTER:-0}
 
 OPENCLAW_NODE=${OPENCLAW_NODE:-/usr/bin/node}
 OPENCLAW_CLI=${OPENCLAW_CLI:-$HOME/.local/openclaw/node_modules/openclaw/dist/index.js}
 
 mkdir -p "$LOG_DIR"
 
+# Mirror service output into the task manager log for easier debugging.
+exec > >(tee -a "$TASK_MANAGER_LOG") 2>&1
+
 log() {
-  echo "[$TIMESTAMP] $1"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+sql_escape() {
+  echo "$1" | sed "s/'/''/g"
 }
 
 query() {
@@ -53,6 +69,40 @@ openclaw_cmd() {
   else
     "$OPENCLAW_NODE" "$OPENCLAW_CLI" "$@"
   fi
+}
+
+openclaw_cmd_stream() {
+  if command -v stdbuf >/dev/null 2>&1; then
+    if command -v openclaw >/dev/null 2>&1; then
+      stdbuf -oL -eL openclaw "$@"
+    else
+      stdbuf -oL -eL "$OPENCLAW_NODE" "$OPENCLAW_CLI" "$@"
+    fi
+  else
+    openclaw_cmd "$@"
+  fi
+}
+
+cleanup_project_test_env() {
+  if [ "$TEST_CLEANUP_AFTER" -ne 1 ]; then
+    return
+  fi
+
+  if [ -z "$1" ]; then
+    return
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    return
+  fi
+
+  local project_dir="$HOME/projects/$1"
+  if [ ! -f "$project_dir/docker-compose.yml" ]; then
+    return
+  fi
+
+  log "Cleaning up test environment for project '$1'"
+  (cd "$project_dir" && docker compose down -v) || true
 }
 
 normalize_statuses() {
@@ -79,6 +129,113 @@ send_notification() {
   elif [ -f "$DISCORD_NOTIFY" ]; then
     bash "$DISCORD_NOTIFY" "$status" "$task_id" "$task_name" "$details"
   fi
+}
+
+record_blocked_reason() {
+  local task_id="$1"
+  local reason="$2"
+  local reason_sql
+  reason_sql=$(sql_escape "$reason")
+  execute "INSERT INTO blocked_reasons (task_id, reason) VALUES ($task_id, '$reason_sql');"
+}
+
+summarize_blocked_reasons() {
+  local task_id="$1"
+  local summary
+  summary=$(query "SELECT COALESCE(reason,'') FROM blocked_reasons WHERE task_id = $task_id ORDER BY created_at ASC;")
+  if [ -z "$summary" ]; then
+    echo "(no reasons captured)"
+    return
+  fi
+
+  local message=""
+  while IFS='|' read -r reason; do
+    reason=$(echo "$reason" | xargs)
+    if [ -n "$reason" ]; then
+      message+="- ${reason}\n"
+    fi
+  done <<< "$summary"
+
+  if [ -z "$message" ]; then
+    echo "(no reasons captured)"
+    return
+  fi
+
+  echo -e "$message"
+}
+
+task_context() {
+  local task_id="$1"
+  local row
+  row=$(query "SELECT COALESCE(implementation_plan,''), COALESCE(notes,''), COALESCE(solution,''), COALESCE(project,'') FROM autonomous_tasks WHERE id = $task_id;")
+  if [ -z "$row" ]; then
+    echo ""
+    return
+  fi
+
+  local plan notes solution project
+  IFS='|' read -r plan notes solution project <<< "$row"
+
+  plan=$(echo "$plan" | xargs)
+  notes=$(echo "$notes" | xargs)
+  solution=$(echo "$solution" | xargs)
+  project=$(echo "$project" | xargs)
+
+  local context=""
+  if [ -n "$project" ]; then
+    context+="Project: $project\n"
+  fi
+  if [ -n "$plan" ]; then
+    context+="Plan: $plan\n"
+  fi
+  if [ -n "$notes" ]; then
+    context+="Notes: $notes\n"
+  fi
+  if [ -n "$solution" ]; then
+    context+="Solution: $solution\n"
+  fi
+
+  echo -e "$context"
+}
+
+cleanup_completed_tasks() {
+  local retention_days="$1"
+  execute "DELETE FROM blocked_reasons
+           WHERE task_id IN (
+             SELECT id
+             FROM autonomous_tasks
+             WHERE status = 'COMPLETE'
+               AND completed_at < NOW() - INTERVAL '${retention_days} days'
+           );"
+  execute "DELETE FROM autonomous_tasks
+           WHERE status = 'COMPLETE'
+             AND completed_at < NOW() - INTERVAL '${retention_days} days';"
+}
+
+cleanup_task_logs() {
+  local retention_days="$1"
+  if [ -d "$LOG_DIR" ]; then
+    find "$LOG_DIR" -type f -name "task-*.log" -mtime +"$retention_days" -delete 2>/dev/null || true
+  fi
+}
+
+cleanup_completed_task_logs() {
+  if [ ! -d "$LOG_DIR" ]; then
+    return
+  fi
+
+  local completed_ids
+  completed_ids=$(query "SELECT id FROM autonomous_tasks WHERE status = 'COMPLETE';")
+  if [ -z "$completed_ids" ]; then
+    return
+  fi
+
+  while IFS='|' read -r task_id; do
+    task_id=$(echo "$task_id" | xargs)
+    if [ -n "$task_id" ]; then
+      rm -f "$LOG_DIR/task-${task_id}.log" 2>/dev/null || true
+    fi
+  done <<< "$completed_ids"
 }
 
 send_blocked_digest_if_needed() {
@@ -119,18 +276,28 @@ send_blocked_digest_if_needed() {
 }
 
 log "=== Autonomous Task Manager Starting (Database Mode) ==="
+log "Working directory: $(pwd)"
+log "OPENCLAW_NODE=$OPENCLAW_NODE"
+log "OPENCLAW_CLI=$OPENCLAW_CLI"
 
 normalize_statuses
 
 log "Checking for stale PIDs..."
-STALE_TASKS=$(query "SELECT id, name, pid, started_at FROM autonomous_tasks WHERE status = 'IN_PROGRESS' AND pid IS NOT NULL;")
+STALE_TASKS=$(query "SELECT id, name, pid, started_at, attempt_count, COALESCE(assigned_agent,'') FROM autonomous_tasks WHERE status = 'IN_PROGRESS' AND pid IS NOT NULL;")
 
 if [ -n "$STALE_TASKS" ]; then
-  echo "$STALE_TASKS" | while IFS='|' read -r task_id name pid started_at; do
+  echo "$STALE_TASKS" | while IFS='|' read -r task_id name pid started_at attempt_count assigned_agent; do
     task_id=$(echo "$task_id" | xargs)
     name=$(echo "$name" | xargs)
     pid=$(echo "$pid" | xargs)
     started_at=$(echo "$started_at" | xargs)
+    attempt_count=$(echo "$attempt_count" | xargs)
+    assigned_agent=$(echo "$assigned_agent" | xargs)
+
+    max_attempts="$MAX_ATTEMPTS"
+    if [ "$assigned_agent" = "tester" ]; then
+      max_attempts="$TESTER_MAX_ATTEMPTS"
+    fi
 
     is_running=0
     if [ -n "$pid" ] && ps -p "$pid" >/dev/null 2>&1; then
@@ -150,6 +317,8 @@ if [ -n "$STALE_TASKS" ]; then
     fi
 
     if [ "$is_stale" -eq 1 ] || [ "$is_running" -eq 0 ]; then
+      next_attempt=$((attempt_count + 1))
+      record_blocked_reason "$task_id" "Abrupt stop: stale PID $pid"
       if [ "$is_running" -eq 1 ] && [ -n "$pid" ]; then
         log "Stale timeout for task: $name (PID $pid) - terminating"
         kill -15 "$pid" >/dev/null 2>&1 || true
@@ -161,18 +330,39 @@ if [ -n "$STALE_TASKS" ]; then
         log "Found stale PID $pid for task: $name"
       fi
 
-      execute "UPDATE autonomous_tasks
-               SET status = 'TODO',
-                   blocked_reason = 'Stale PID reset: $pid',
-                   pid = NULL,
-                   assigned_agent = NULL,
-               started_at = NULL,
-                   attempt_count = attempt_count + 1
-               WHERE id = $task_id;"
-      send_notification reset "$task_id" "$name" "Stale PID reset to TODO"
+      if [ "$next_attempt" -ge "$max_attempts" ]; then
+        summary=$(summarize_blocked_reasons "$task_id")
+        context=$(task_context "$task_id")
+        execute "UPDATE autonomous_tasks
+                 SET status = 'BLOCKED',
+                     blocked_reason = 'Attempt limit reached; requires human unblock',
+                     error_log = 'Attempt limit reached; requires human unblock',
+                     pid = NULL,
+                     assigned_agent = NULL,
+                     started_at = NULL,
+                     attempt_count = $next_attempt
+                 WHERE id = $task_id;"
+        send_notification blocker "$task_id" "$name" "Attempt limit reached ($max_attempts).\n${context}\nFailures:\n${summary}\nSuggested: provide a solution with /unblock $task_id <solution>."
+      else
+        execute "UPDATE autonomous_tasks
+                 SET status = 'TODO',
+                     blocked_reason = 'Stale PID reset: $pid',
+                     pid = NULL,
+                     assigned_agent = NULL,
+                     started_at = NULL,
+                     attempt_count = $next_attempt
+                 WHERE id = $task_id;"
+        send_notification reset "$task_id" "$name" "Stale PID reset to TODO"
+      fi
     fi
   done
 fi
+
+execute "UPDATE autonomous_tasks
+         SET status = 'BLOCKED',
+             blocked_reason = 'Attempt limit reached; requires human unblock',
+             error_log = 'Attempt limit reached; requires human unblock'
+         WHERE status = 'TODO' AND attempt_count >= $MAX_ATTEMPTS;"
 
 RUNNING_CODER=$(query "SELECT COUNT(*) FROM autonomous_tasks WHERE status = 'IN_PROGRESS' AND assigned_agent = 'coder' AND pid IS NOT NULL;" | xargs)
 RUNNING_TESTER=$(query "SELECT COUNT(*) FROM autonomous_tasks WHERE status = 'IN_PROGRESS' AND assigned_agent = 'tester' AND pid IS NOT NULL;" | xargs)
@@ -184,14 +374,31 @@ SLOTS_CODER=$((MAX_PARALLEL_CODER - RUNNING_CODER))
 SLOTS_TESTER=$((MAX_PARALLEL_TESTER - RUNNING_TESTER))
 
 if [ "$SLOTS_CODER" -gt 0 ]; then
-  TODO_TASKS=$(query "SELECT id, name, implementation_plan, phase, COALESCE(notes,'') FROM autonomous_tasks WHERE status = 'TODO' ORDER BY priority DESC, id ASC;")
+  TODO_TASKS=$(query "SELECT id, name, implementation_plan, phase, COALESCE(notes,''), attempt_count, COALESCE(project,''), COALESCE(solution,'')
+                      FROM autonomous_tasks
+                      WHERE status = 'TODO'
+                        AND attempt_count < $MAX_ATTEMPTS
+                      ORDER BY priority DESC, id ASC;")
 
   if [ -n "$TODO_TASKS" ]; then
-    echo "$TODO_TASKS" | while IFS='|' read -r task_id name plan phase notes; do
+    echo "$TODO_TASKS" | while IFS='|' read -r task_id name plan phase notes attempt_count project solution; do
       task_id=$(echo "$task_id" | xargs)
       name=$(echo "$name" | xargs)
       plan=$(echo "$plan" | xargs)
       phase=$(echo "$phase" | xargs)
+      attempt_count=$(echo "$attempt_count" | xargs)
+      project=$(echo "$project" | xargs)
+      solution=$(echo "$solution" | xargs)
+
+      if [ "$attempt_count" -ge "$MAX_ATTEMPTS" ]; then
+        execute "UPDATE autonomous_tasks
+                 SET status = 'BLOCKED',
+                     blocked_reason = 'Attempt limit reached; requires human unblock',
+                     error_log = 'Attempt limit reached; requires human unblock'
+                 WHERE id = $task_id;"
+        send_notification blocker "$task_id" "$name" "Attempt limit reached; requires human unblock"
+        continue
+      fi
 
       agent="coder"
 
@@ -212,23 +419,31 @@ if [ "$SLOTS_CODER" -gt 0 ]; then
         echo
         echo "=== Execution Log ==="
 
-        execute "UPDATE autonomous_tasks
-             SET status = 'IN_PROGRESS',
-               assigned_agent = '$agent',
-               pid = $$,
-               started_at = CURRENT_TIMESTAMP,
-               attempt_count = attempt_count + 1
-             WHERE id = $task_id;"
-
         payload=$(cat <<EOF
 Task ID: $task_id
 Task Name: $name
+      Project: ${project:-<unspecified>}
 Phase: $phase
 Plan: $plan
+      Solution (if provided): ${solution:-<none>}
 
 Update task notes with:
 - Files changed
 - Tests run (command + result)
+- Docs updated (README/CHANGELOG/DEPLOYMENT_TASKS as needed)
+
+Git safety (required):
+- Target repo directory is: ~/projects/${project:-<unspecified>}.
+- Before any git operation, cd into the target repo and verify git rev-parse --is-inside-work-tree succeeds.
+- Verify origin remote matches the target project name:
+  - remote_url=\$(git remote get-url origin)
+  - remote_url must contain /${project} or :${project}.
+- If remote check fails or project is unspecified, do not push and return TASK_BLOCKED:$task_id:REMOTE_MISMATCH.
+- If copying from a base repo, never copy `.git` metadata.
+- Use copy commands that exclude .git (for example: rsync -a --exclude .git <src>/ <dst>/).
+
+If behavior, setup, or usage changes, update repo documentation accordingly.
+Do not push changes; phase tester will push after successful testing.
 
 Return one of these markers in your final response:
 - TASK_COMPLETE:$task_id
@@ -236,33 +451,93 @@ Return one of these markers in your final response:
 EOF
 )
 
-        response=$(openclaw_cmd agent --agent "$agent" --message "$payload" --timeout "$AGENT_TIMEOUT" 2>&1 || true)
-        echo "$response"
+        response_file=$(mktemp)
+        : > "$response_file"
+        log "Launching agent for task $task_id (agent=$agent, timeout=${AGENT_TIMEOUT}s)"
+        openclaw_cmd_stream agent --agent "$agent" --message "$payload" --timeout "$AGENT_TIMEOUT" > "$response_file" 2>&1 &
+        cmd_pid=$!
+        tail --pid="$cmd_pid" -n +1 -f "$response_file" &
+        tail_pid=$!
+        agent_pid="$cmd_pid"
+        sleep 0.2
+        child_pid=$(pgrep -P "$cmd_pid" -n openclaw-agent 2>/dev/null || true)
+        if [ -z "$child_pid" ]; then
+          child_pid=$(pgrep -P "$cmd_pid" -n openclaw 2>/dev/null || true)
+        fi
+        if [ -n "$child_pid" ]; then
+          agent_pid="$child_pid"
+        fi
 
-        if echo "$response" | grep -q "TASK_COMPLETE:$task_id"; then
+        execute "UPDATE autonomous_tasks
+                 SET status = 'IN_PROGRESS',
+                     assigned_agent = '$agent',
+                     pid = $agent_pid,
+                     started_at = CURRENT_TIMESTAMP,
+                     attempt_count = attempt_count + 1
+                 WHERE id = $task_id;"
+        log "Task $task_id recorded PID $agent_pid (cmd pid $cmd_pid)"
+
+        heartbeat_pid=""
+        if [ "$VERBOSE_TASK_LOGS" -eq 1 ]; then
+          (
+            while kill -0 "$cmd_pid" 2>/dev/null; do
+              sleep "$TASK_HEARTBEAT_SEC"
+              if kill -0 "$cmd_pid" 2>/dev/null; then
+                log "Task $task_id heartbeat: agent still running (pid $agent_pid)"
+              fi
+            done
+          ) &
+          heartbeat_pid=$!
+        fi
+
+        set +e
+        wait "$cmd_pid"
+        rc=$?
+        set -e
+        if [ -n "$heartbeat_pid" ]; then
+          kill "$heartbeat_pid" 2>/dev/null || true
+        fi
+        if [ -n "${tail_pid:-}" ]; then
+          kill "$tail_pid" 2>/dev/null || true
+        fi
+        response=$(cat "$response_file")
+        rm -f "$response_file"
+        echo "$response"
+        if [ "$rc" -ne 0 ]; then
+          log "Agent command failed for task $task_id (rc=$rc)"
+        elif [ -z "$response" ]; then
+          log "Agent command returned empty response for task $task_id"
+        fi
+
+        if echo "$response" | grep -qi -E "TASK_COMPLETE:$task_id|TASK[ _-]?COMPLETE"; then
           execute "UPDATE autonomous_tasks
                    SET status = 'READY_FOR_TESTING',
-                       pid = NULL
+                       pid = NULL,
+                       attempt_count = 0
                    WHERE id = $task_id;"
           send_notification ready "$task_id" "$name" "ready for testing"
         elif echo "$response" | grep -q "TASK_BLOCKED:$task_id:"; then
           reason=$(echo "$response" | sed -n "s/.*TASK_BLOCKED:$task_id:\(.*\)$/\1/p" | head -n 1)
           reason=${reason//"'"/"''"}
+          context=$(task_context "$task_id")
+          record_blocked_reason "$task_id" "Agent blocked: ${reason}"
           execute "UPDATE autonomous_tasks
                    SET status = 'BLOCKED',
                        pid = NULL,
                        blocked_reason = 'Task blocked: $reason',
                        error_log = '$reason'
                    WHERE id = $task_id;"
-          send_notification blocker "$task_id" "$name" "$reason"
+          send_notification blocker "$task_id" "$name" "${context}\nReason: $reason"
         else
+          context=$(task_context "$task_id")
+          record_blocked_reason "$task_id" "Abrupt stop: no completion marker"
           execute "UPDATE autonomous_tasks
                    SET status = 'BLOCKED',
                        pid = NULL,
                        blocked_reason = 'No completion marker found in agent response',
                        error_log = 'No completion marker found in agent response'
                    WHERE id = $task_id;"
-          send_notification blocker "$task_id" "$name" "No completion marker found"
+          send_notification blocker "$task_id" "$name" "${context}\nReason: No completion marker found"
         fi
 
         echo
@@ -270,8 +545,7 @@ EOF
       ) &
 
       NEW_PID=$!
-      execute "UPDATE autonomous_tasks SET pid = $NEW_PID WHERE id = $task_id;"
-      log "Task $task_id started with PID $NEW_PID"
+      log "Task $task_id worker PID $NEW_PID"
 
       SLOTS_CODER=$((SLOTS_CODER - 1))
 
@@ -285,30 +559,33 @@ EOF
 fi
 
 if [ "$SLOTS_TESTER" -gt 0 ]; then
-  READY_PHASES=$(query "SELECT COALESCE(phase,'__NO_PHASE__') AS phase_key
-                        FROM autonomous_tasks
-                        GROUP BY phase_key
-                        HAVING SUM(CASE WHEN status IN ('TODO','IN_PROGRESS','BLOCKED') THEN 1 ELSE 0 END) = 0
-                           AND SUM(CASE WHEN status = 'READY_FOR_TESTING' THEN 1 ELSE 0 END) > 0
-                        ORDER BY phase_key;")
+        READY_PHASES=$(query "SELECT COALESCE(project,''), COALESCE(phase,'__NO_PHASE__') AS phase_key
+                    FROM autonomous_tasks
+                    GROUP BY project, phase_key
+                    HAVING SUM(CASE WHEN status IN ('TODO','IN_PROGRESS','BLOCKED') THEN 1 ELSE 0 END) = 0
+                      AND SUM(CASE WHEN status = 'READY_FOR_TESTING' THEN 1 ELSE 0 END) > 0
+                    ORDER BY project, phase_key;")
 
   if [ -n "$READY_PHASES" ]; then
-    echo "$READY_PHASES" | while IFS='|' read -r phase_key; do
+    echo "$READY_PHASES" | while IFS='|' read -r phase_project phase_key; do
+      phase_project=$(echo "$phase_project" | xargs)
       phase_key=$(echo "$phase_key" | xargs)
 
       if [ "$phase_key" = "__NO_PHASE__" ]; then
-        PHASE_TASKS=$(query "SELECT id, name, implementation_plan FROM autonomous_tasks
+        PHASE_TASKS=$(query "SELECT id, name, implementation_plan, COALESCE(project,'') FROM autonomous_tasks
                             WHERE status = 'READY_FOR_TESTING' AND phase IS NULL
+                              AND COALESCE(project,'') = '$phase_project'
                             ORDER BY priority DESC, id ASC;")
         phase_label=""
-        phase_filter="phase IS NULL"
+        phase_filter="phase IS NULL AND COALESCE(project,'') = '$phase_project'"
       else
         phase_label="$phase_key"
         phase_key=${phase_key//"'"/"''"}
-        PHASE_TASKS=$(query "SELECT id, name, implementation_plan FROM autonomous_tasks
+        PHASE_TASKS=$(query "SELECT id, name, implementation_plan, COALESCE(project,'') FROM autonomous_tasks
                             WHERE status = 'READY_FOR_TESTING' AND phase = '$phase_key'
+                              AND COALESCE(project,'') = '$phase_project'
                             ORDER BY priority DESC, id ASC;")
-        phase_filter="phase = '$phase_key'"
+        phase_filter="phase = '$phase_key' AND COALESCE(project,'') = '$phase_project'"
       fi
 
       if [ -z "$PHASE_TASKS" ]; then
@@ -317,6 +594,24 @@ if [ "$SLOTS_TESTER" -gt 0 ]; then
 
       primary_id=$(echo "$PHASE_TASKS" | head -n 1 | cut -d'|' -f1 | xargs)
       primary_name=$(echo "$PHASE_TASKS" | head -n 1 | cut -d'|' -f2 | xargs)
+      primary_attempt_count=$(query "SELECT COALESCE(attempt_count,0) FROM autonomous_tasks WHERE id = $primary_id;" | xargs)
+      if [ -z "$primary_attempt_count" ]; then
+        primary_attempt_count=0
+      fi
+
+      if [ "$primary_attempt_count" -ge "$TESTER_MAX_ATTEMPTS" ]; then
+        context=$(task_context "$primary_id")
+        record_blocked_reason "$primary_id" "Tester attempt limit reached ($TESTER_MAX_ATTEMPTS)"
+        execute "UPDATE autonomous_tasks
+                 SET status = 'BLOCKED',
+                     pid = NULL,
+                     assigned_agent = NULL,
+                     blocked_reason = 'Tester attempt limit reached; requires human unblock',
+                     error_log = 'Tester attempt limit reached; requires human unblock'
+                 WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
+        send_notification blocker "$primary_id" "$primary_name" "${context}\nTester retries reached limit ($TESTER_MAX_ATTEMPTS). Use /unblock $primary_id <solution> to continue."
+        continue
+      fi
 
       log "Dispatching tester for phase '$phase_label' (task $primary_id)"
       WORK_LOG="$LOG_DIR/task-${primary_id}.log"
@@ -336,57 +631,187 @@ if [ "$SLOTS_TESTER" -gt 0 ]; then
         echo
         echo "=== Execution Log ==="
 
-        execute "UPDATE autonomous_tasks
-                 SET status = 'IN_PROGRESS',
-                     assigned_agent = 'tester',
-                     pid = $$,
-                     started_at = CURRENT_TIMESTAMP,
-                     attempt_count = attempt_count + 1
-                 WHERE id = $primary_id;"
-
         payload=$(cat <<EOF
 Primary Task ID: $primary_id
+      Project: ${phase_project:-<unspecified>}
 Phase: ${phase_label:-<none>}
 Tasks in phase:
 $PHASE_TASKS
 
 Run E2E + data validation for this phase.
+First output must be: "STEP 1: Boot check".
+Use this step order and timebox each step to ${TESTER_STEP_TIMEOUT}s:
+1) Boot check (docker compose up -d + health endpoints)
+2) Schema + seed validation
+3) API smoke checks
+4) UI build/lint
+5) UI flow check (minimal)
+Before each step, print "STEP <n>: <name>".
+After each step, print "STEP <n> RESULT: PASS/FAIL - <short reason>".
 If failures occur, create coder tasks with repro steps and logs.
 
-Return one of these markers in your final response:
+Tester code changes:
+- You may make small, targeted fixes to address issues found during testing.
+- If the fix is more than a small change or requires refactoring, do not implement it; create a coder task with repro steps.
+
+Non-blocking guardrails:
+- Preflight once before STEP 1: verify DB reachable, required containers running, and required init files exist (e.g., /app/init_db.py).
+- If preflight fails, report the exact error and continue to summarize findings (do not block).
+- If any step repeats the same error twice, stop further steps, summarize the issue, and continue (do not block).
+- If a container is restarting, wait up to 60s for healthy; if still unhealthy, report and continue (do not block).
+
+Documentation is mandatory before pushing:
+- Review docs impact every run.
+- Update README.md, CHANGELOG.md, and deployment docs when behavior/setup/API changes.
+- If no docs change is needed, include "DOCS_CHECK: no changes required" in your final response.
+
+Git safety before commit/push (required):
+- Target repo directory is: ~/projects/${phase_project:-<unspecified>}.
+- Before any git add/commit/push, cd into target repo and verify git rev-parse --is-inside-work-tree succeeds.
+- Verify origin remote matches target project name:
+  - remote_url=\$(git remote get-url origin)
+  - remote_url must contain /${phase_project} or :${phase_project}.
+- If remote check fails or project is unspecified, do not push and include REMOTE_MISMATCH details in final response.
+
+Always complete docs review/update before commit and push all changes.
+Commit message should be a short summary of what the phase was for.
+
+Return these markers in your final response:
 - TASK_COMPLETE:$primary_id
-- TASK_BLOCKED:$primary_id:<reason>
+- GIT_PUSHED:$primary_id:<branch>:<short_sha>
+
+If push cannot be completed, return:
+- TASK_BLOCKED:$primary_id:PUSH_FAILED:<reason>
 EOF
 )
 
-        response=$(openclaw_cmd agent --agent "tester" --message "$payload" --timeout "$AGENT_TIMEOUT" 2>&1 || true)
+        response_file=$(mktemp)
+        : > "$response_file"
+        log "Launching agent for phase $primary_id (agent=tester, timeout=${TESTER_TIMEOUT}s)"
+        openclaw_cmd_stream agent --agent "tester" --message "$payload" --timeout "$TESTER_TIMEOUT" > "$response_file" 2>&1 &
+        cmd_pid=$!
+        tail --pid="$cmd_pid" -n +1 -f "$response_file" &
+        tail_pid=$!
+        agent_pid="$cmd_pid"
+        sleep 0.2
+        child_pid=$(pgrep -P "$cmd_pid" -n openclaw-agent 2>/dev/null || true)
+        if [ -z "$child_pid" ]; then
+          child_pid=$(pgrep -P "$cmd_pid" -n openclaw 2>/dev/null || true)
+        fi
+        if [ -n "$child_pid" ]; then
+          agent_pid="$child_pid"
+        fi
+
+        execute "UPDATE autonomous_tasks
+                 SET status = 'IN_PROGRESS',
+                     assigned_agent = 'tester',
+                     pid = $agent_pid,
+                     started_at = CURRENT_TIMESTAMP,
+                     attempt_count = attempt_count + 1
+                 WHERE id = $primary_id;"
+        log "Tester $primary_id recorded PID $agent_pid (cmd pid $cmd_pid)"
+
+        heartbeat_pid=""
+        if [ "$VERBOSE_TASK_LOGS" -eq 1 ]; then
+          (
+            while kill -0 "$cmd_pid" 2>/dev/null; do
+              sleep "$TASK_HEARTBEAT_SEC"
+              if kill -0 "$cmd_pid" 2>/dev/null; then
+                log "Tester $primary_id heartbeat: agent still running (pid $agent_pid)"
+              fi
+            done
+          ) &
+          heartbeat_pid=$!
+        fi
+
+        set +e
+        wait "$cmd_pid"
+        rc=$?
+        set -e
+        if [ -n "$heartbeat_pid" ]; then
+          kill "$heartbeat_pid" 2>/dev/null || true
+        fi
+        if [ -n "${tail_pid:-}" ]; then
+          kill "$tail_pid" 2>/dev/null || true
+        fi
+        response=$(cat "$response_file")
+        rm -f "$response_file"
         echo "$response"
 
-        if echo "$response" | grep -q "TASK_COMPLETE:$primary_id"; then
+        if echo "$response" | grep -qi -E "TASK_COMPLETE:$primary_id|TASK[ _-]?COMPLETE" \
+          && echo "$response" | grep -qi "GIT_PUSHED:$primary_id:"; then
             execute "UPDATE autonomous_tasks
                  SET status = 'COMPLETE',
                    pid = NULL,
                    completed_at = CURRENT_TIMESTAMP
                  WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
           send_notification complete "$primary_id" "$primary_name" "phase complete"
+          cleanup_project_test_env "$phase_project"
+        elif echo "$response" | grep -qi -E "TASK_COMPLETE:$primary_id|TASK[ _-]?COMPLETE"; then
+          context=$(task_context "$primary_id")
+          record_blocked_reason "$primary_id" "Tester missing git push confirmation marker"
+            execute "UPDATE autonomous_tasks
+                 SET status = 'READY_FOR_TESTING',
+                   pid = NULL,
+                   assigned_agent = NULL,
+                   blocked_reason = NULL,
+                   error_log = 'Tester marked complete without GIT_PUSHED marker'
+                 WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
+          send_notification ready "$primary_id" "$primary_name" "${context}\nTester marked complete without push confirmation (non-blocking)"
         elif echo "$response" | grep -q "TASK_BLOCKED:$primary_id:"; then
           reason=$(echo "$response" | sed -n "s/.*TASK_BLOCKED:$primary_id:\(.*\)$/\1/p" | head -n 1)
           reason=${reason//"'"/"''"}
+          context=$(task_context "$primary_id")
+          updated_attempt_count=$(query "SELECT COALESCE(attempt_count,0) FROM autonomous_tasks WHERE id = $primary_id;" | xargs)
+          if [ -z "$updated_attempt_count" ]; then
+            updated_attempt_count=0
+          fi
+          record_blocked_reason "$primary_id" "Tester reported blocked: ${reason}"
+          if [ "$updated_attempt_count" -ge "$TESTER_MAX_ATTEMPTS" ]; then
             execute "UPDATE autonomous_tasks
                  SET status = 'BLOCKED',
                    pid = NULL,
-                   blocked_reason = 'Testing blocked: $reason',
-                   error_log = '$reason'
+                   assigned_agent = NULL,
+                   blocked_reason = 'Tester attempt limit reached; requires human unblock',
+                   error_log = 'Tester attempt limit reached; last error: $reason'
                  WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
-          send_notification blocker "$primary_id" "$primary_name" "$reason"
+            send_notification blocker "$primary_id" "$primary_name" "${context}\nTester reported blocked and reached max retries ($TESTER_MAX_ATTEMPTS): $reason\nUse /unblock $primary_id <solution>."
+          else
+            execute "UPDATE autonomous_tasks
+                 SET status = 'READY_FOR_TESTING',
+                   pid = NULL,
+                   assigned_agent = NULL,
+                   blocked_reason = NULL,
+                   error_log = 'Tester reported blocked: $reason'
+                 WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
+            send_notification ready "$primary_id" "$primary_name" "${context}\nTester reported blocked (attempt $updated_attempt_count/$TESTER_MAX_ATTEMPTS, non-blocking): $reason"
+          fi
         else
-          execute "UPDATE autonomous_tasks
-                   SET status = 'BLOCKED',
-                       pid = NULL,
-                       blocked_reason = 'No completion marker found in agent response',
-                       error_log = 'No completion marker found in agent response'
-                   WHERE id = $primary_id;"
-          send_notification blocker "$primary_id" "$primary_name" "No completion marker found"
+          context=$(task_context "$primary_id")
+          updated_attempt_count=$(query "SELECT COALESCE(attempt_count,0) FROM autonomous_tasks WHERE id = $primary_id;" | xargs)
+          if [ -z "$updated_attempt_count" ]; then
+            updated_attempt_count=0
+          fi
+          record_blocked_reason "$primary_id" "Tester missing completion marker"
+          if [ "$updated_attempt_count" -ge "$TESTER_MAX_ATTEMPTS" ]; then
+            execute "UPDATE autonomous_tasks
+                 SET status = 'BLOCKED',
+                   pid = NULL,
+                   assigned_agent = NULL,
+                   blocked_reason = 'Tester attempt limit reached; requires human unblock',
+                   error_log = 'Tester attempt limit reached; last error: missing completion marker'
+                 WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
+            send_notification blocker "$primary_id" "$primary_name" "${context}\nTester missing completion marker and reached max retries ($TESTER_MAX_ATTEMPTS). Use /unblock $primary_id <solution>."
+          else
+            execute "UPDATE autonomous_tasks
+                 SET status = 'READY_FOR_TESTING',
+                   pid = NULL,
+                   assigned_agent = NULL,
+                   blocked_reason = NULL,
+                   error_log = 'Tester missing completion marker'
+                 WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
+            send_notification ready "$primary_id" "$primary_name" "${context}\nTester returned no completion marker (attempt $updated_attempt_count/$TESTER_MAX_ATTEMPTS, non-blocking)"
+          fi
         fi
 
         echo
@@ -394,8 +819,7 @@ EOF
       ) &
 
       NEW_PID=$!
-      execute "UPDATE autonomous_tasks SET pid = $NEW_PID WHERE id = $primary_id;"
-      log "Tester started with PID $NEW_PID"
+      log "Tester worker PID $NEW_PID"
 
       SLOTS_TESTER=$((SLOTS_TESTER - 1))
       if [ "$SLOTS_TESTER" -le 0 ]; then
@@ -413,6 +837,10 @@ if [ "$BLOCKED_COUNT" -gt 0 ]; then
 fi
 
 send_blocked_digest_if_needed "$BLOCKED_COUNT"
+
+cleanup_completed_tasks "$COMPLETED_RETENTION_DAYS"
+cleanup_completed_task_logs
+cleanup_task_logs "$LOG_RETENTION_DAYS"
 
 TODO_COUNT=$(query "SELECT COUNT(*) FROM autonomous_tasks WHERE status = 'TODO';" | xargs)
 READY_COUNT=$(query "SELECT COUNT(*) FROM autonomous_tasks WHERE status = 'READY_FOR_TESTING';" | xargs)

@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw Chat Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/workspace
+EnvironmentFile=-%h/.env
+ExecStart=/usr/bin/python3 %h/.openclaw/workspace/chat-router.py
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:%h/.openclaw/workspace/chat-router.log
+StandardError=append:%h/.openclaw/workspace/chat-router.log
+
+[Install]
+WantedBy=default.target

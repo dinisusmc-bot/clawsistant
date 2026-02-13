@@ -34,7 +34,7 @@ Requires=openclaw-task-manager-db.service
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=30min
+OnUnitActiveSec=1min
 Persistent=true
 AccuracySec=1min
 

@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+KillMode=none
 WorkingDirectory=%h/.openclaw/workspace
 ExecStartPre=/bin/bash %h/.openclaw/workspace/init-autonomous-tasks-db.sh
 ExecStartPre=/bin/bash %h/.openclaw/workspace/migrate-task-statuses.sh

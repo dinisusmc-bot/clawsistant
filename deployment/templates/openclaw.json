@@ -179,7 +179,8 @@
   "skills": {
     "load": {
       "extraDirs": [
-        "__HOME__/projects/agent-skills/skills"
+        "__HOME__/projects/agent-skills/skills",
+        "__HOME__/skills"
       ]
     },
     "install": {
@@ -197,7 +198,7 @@
   "plugins": {
     "entries": {
       "telegram": {
-        "enabled": true
+        "enabled": false
       },
       "discord": {
         "enabled": false

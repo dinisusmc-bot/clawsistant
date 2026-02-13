@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenClaw Model Health Check Timer
+Requires=openclaw-model-health.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

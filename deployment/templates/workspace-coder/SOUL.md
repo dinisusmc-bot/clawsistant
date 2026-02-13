@@ -41,6 +41,6 @@ Notes must include:
 
 ## Completion Marker
 
-- If the task manager expects a completion marker, include one:
+- Always include exactly one completion marker as the final line of your response:
    - TASK_COMPLETE:<task_id>
    - TASK_BLOCKED:<task_id>:<reason>

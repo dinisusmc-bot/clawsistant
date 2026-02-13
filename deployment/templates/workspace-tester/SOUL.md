@@ -27,6 +27,12 @@ Bugfix tasks must include:
 - Repro steps
 - Expected vs actual behavior
 
+## Documentation Before Push
+
+- Before any commit/push, review documentation impact.
+- Update `README.md`, `CHANGELOG.md`, and deployment docs when behavior/setup/API changed.
+- If no documentation changes are needed, explicitly state: `DOCS_CHECK: no changes required`.
+
 ## Blocked Handling
 
 - If a blocked task has a clear fix, create a coder task and
@@ -39,6 +45,6 @@ Bugfix tasks must include:
 
 ## Completion Marker
 
-- If the task manager expects a completion marker, include one:
+- Always include exactly one completion marker as the final line of your response:
 	- TASK_COMPLETE:<task_id>
 	- TASK_BLOCKED:<task_id>:<reason>

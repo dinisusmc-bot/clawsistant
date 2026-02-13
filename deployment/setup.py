@@ -168,17 +168,36 @@ def main() -> int:
     )
     write_file(home / ".telegram-env", telegram_env, mode=0o600)
 
-    postgres_env = "\n".join(
-        [
-            f"OPENCLAW_POSTGRES_HOST={env.get('OPENCLAW_POSTGRES_HOST', 'localhost')}",
-            f"OPENCLAW_POSTGRES_PORT={env.get('OPENCLAW_POSTGRES_PORT', '5433')}",
-            f"OPENCLAW_POSTGRES_DB={env.get('OPENCLAW_POSTGRES_DB', 'openclaw')}",
-            f"OPENCLAW_POSTGRES_USER={env.get('OPENCLAW_POSTGRES_USER', 'openclaw')}",
-            f"OPENCLAW_POSTGRES_PASSWORD={env.get('OPENCLAW_POSTGRES_PASSWORD', '')}",
-            "",
-        ]
-    )
-    write_file(home / ".env", postgres_env, mode=0o600)
+    postgres_env_lines = [
+        f"OPENCLAW_POSTGRES_HOST={env.get('OPENCLAW_POSTGRES_HOST', 'localhost')}",
+        f"OPENCLAW_POSTGRES_PORT={env.get('OPENCLAW_POSTGRES_PORT', '5433')}",
+        f"OPENCLAW_POSTGRES_DB={env.get('OPENCLAW_POSTGRES_DB', 'openclaw')}",
+        f"OPENCLAW_POSTGRES_USER={env.get('OPENCLAW_POSTGRES_USER', 'openclaw')}",
+        f"OPENCLAW_POSTGRES_PASSWORD={env.get('OPENCLAW_POSTGRES_PASSWORD', '')}",
+        f"OPENAI_API_KEY={env.get('OPENAI_API_KEY', '')}",
+        f"OPENAI_TOOLS_API_KEY={env.get('OPENAI_TOOLS_API_KEY', env.get('OPENAI_API_KEY', ''))}",
+        f"OPENAI_BASE_URL={env.get('OPENAI_BASE_URL', 'http://ai-services:8010/v1')}",
+        f"PRIMARY_TEXT_MODEL={env.get('PRIMARY_TEXT_MODEL', 'qwen3-coder')}",
+        f"PRIMARY_VISION_MODEL={env.get('PRIMARY_VISION_MODEL', 'internvl')}",
+        f"EMBEDDINGS_MODEL={env.get('EMBEDDINGS_MODEL', 'bge-small-en-v1.5')}",
+        f"MAX_ATTEMPTS={env.get('MAX_ATTEMPTS', '2')}",
+        f"VERBOSE_TASK_LOGS={env.get('VERBOSE_TASK_LOGS', '1')}",
+        f"TASK_HEARTBEAT_SEC={env.get('TASK_HEARTBEAT_SEC', '30')}",
+        f"TEST_CLEANUP_AFTER={env.get('TEST_CLEANUP_AFTER', '1')}",
+        f"TESTER_TIMEOUT={env.get('TESTER_TIMEOUT', '2400')}",
+        f"TESTER_STEP_TIMEOUT={env.get('TESTER_STEP_TIMEOUT', '600')}",
+        f"CHAT_ROUTER_PORT={env.get('CHAT_ROUTER_PORT', '18801')}",
+        f"CHAT_ROUTER_URL={env.get('CHAT_ROUTER_URL', 'http://127.0.0.1:18801/route')}",
+        f"CHAT_ROUTER_ASK_TIMEOUT_SEC={env.get('CHAT_ROUTER_ASK_TIMEOUT_SEC', '180')}",
+        f"TELEGRAM_ACK_REACTION={env.get('TELEGRAM_ACK_REACTION', '✅')}",
+        f"MODEL_HEALTH_RETRIES={env.get('MODEL_HEALTH_RETRIES', '2')}",
+        f"MODEL_HEALTH_CONNECT_TIMEOUT_SEC={env.get('MODEL_HEALTH_CONNECT_TIMEOUT_SEC', '5')}",
+        f"MODEL_HEALTH_MODELS_TIMEOUT_SEC={env.get('MODEL_HEALTH_MODELS_TIMEOUT_SEC', '20')}",
+        f"MODEL_HEALTH_CHAT_TIMEOUT_SEC={env.get('MODEL_HEALTH_CHAT_TIMEOUT_SEC', '90')}",
+        f"MODEL_HEALTH_EMBED_TIMEOUT_SEC={env.get('MODEL_HEALTH_EMBED_TIMEOUT_SEC', '60')}",
+        "",
+    ]
+    write_file(home / ".env", "\n".join(postgres_env_lines), mode=0o600)
 
     systemd_src = TEMPLATES_DIR / "systemd"
     systemd_dest = home / ".config" / "systemd" / "user"
@@ -193,6 +212,8 @@ def main() -> int:
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "enable", "--now", "openclaw-task-manager-db.timer"])
     run(["systemctl", "--user", "enable", "--now", "openclaw-telegram-commands.timer"])
+    run(["systemctl", "--user", "enable", "--now", "openclaw-model-health.timer"])
+    run(["systemctl", "--user", "enable", "--now", "openclaw-chat-router.service"])
     run(["systemctl", "--user", "enable", "--now", "openclaw-gateway.service"])
 
     # Install binaries for enabled skills (best-effort)

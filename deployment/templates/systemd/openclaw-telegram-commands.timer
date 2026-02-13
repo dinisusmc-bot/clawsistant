@@ -4,9 +4,9 @@ Requires=openclaw-telegram-commands.service
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1min
+OnUnitActiveSec=15s
 Persistent=true
-AccuracySec=30s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

@@ -46,9 +46,11 @@ while [ "$idx" -lt "$count" ]; do
   plan=${plan//"'"/"''"}
   notes=${notes//"'"/"''"}
 
+  project_escaped=${project//"'"/"''"}
+
   psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-    -c "INSERT INTO autonomous_tasks (name, status, priority, phase, implementation_plan, notes)
-      VALUES ('$name', 'TODO', $priority, NULLIF('$phase',''), NULLIF('$plan',''), NULLIF('$notes',''))" >/dev/null
+    -c "INSERT INTO autonomous_tasks (name, project, status, priority, phase, implementation_plan, notes)
+      VALUES ('$name', '$project_escaped', 'TODO', $priority, NULLIF('$phase',''), NULLIF('$plan',''), NULLIF('$notes',''))" >/dev/null
 
   idx=$((idx + 1))
 done
