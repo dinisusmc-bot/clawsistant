@@ -20,6 +20,9 @@ HEARTBEAT_FILE="$TASKS_DIR/HEARTBEAT.md"
 BLOCKED_DIGEST_STATE="$TASKS_DIR/.blocked-digest.sent"
 DISCORD_NOTIFY="$HOME/.openclaw/workspace/discord-notify.sh"
 TELEGRAM_NOTIFY="$HOME/.openclaw/workspace/telegram-notify.sh"
+AGENT_CONTEXT_DIR="$HOME/.openclaw/workspace/agent-context"
+LESSONS_FILE="$AGENT_CONTEXT_DIR/lessons.log"
+PROJECT_CONTEXT_DIR="$AGENT_CONTEXT_DIR/projects"
 
 MAX_PARALLEL_CODER=${MAX_PARALLEL_CODER:-3}
 MAX_PARALLEL_TESTER=${MAX_PARALLEL_TESTER:-1}
@@ -39,8 +42,12 @@ TEST_CLEANUP_AFTER=${TEST_CLEANUP_AFTER:-0}
 
 OPENCLAW_NODE=${OPENCLAW_NODE:-/usr/bin/node}
 OPENCLAW_CLI=${OPENCLAW_CLI:-$HOME/.local/openclaw/node_modules/openclaw/dist/index.js}
+PLANNER_TEMP=${PLANNER_TEMP:-0.25}
+CODER_TEMP=${CODER_TEMP:-0.18}
+TESTER_TEMP=${TESTER_TEMP:-0.10}
 
 mkdir -p "$LOG_DIR"
+mkdir -p "$AGENT_CONTEXT_DIR" "$PROJECT_CONTEXT_DIR"
 
 # Mirror service output into the task manager log for easier debugging.
 exec > >(tee -a "$TASK_MANAGER_LOG") 2>&1
@@ -82,6 +89,18 @@ openclaw_cmd_stream() {
     openclaw_cmd "$@"
   fi
 }
+
+thinking_from_temp() {
+  awk -v t="$1" 'BEGIN {
+    if (t <= 0.15) { print "minimal"; exit }
+    if (t <= 0.35) { print "low"; exit }
+    if (t <= 0.60) { print "medium"; exit }
+    print "high"
+  }'
+}
+
+CODER_THINKING=$(thinking_from_temp "$CODER_TEMP")
+TESTER_THINKING=$(thinking_from_temp "$TESTER_TEMP")
 
 cleanup_project_test_env() {
   if [ "$TEST_CLEANUP_AFTER" -ne 1 ]; then
@@ -196,6 +215,48 @@ task_context() {
   fi
 
   echo -e "$context"
+}
+
+safe_project_name() {
+  echo "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+lessons_context_text() {
+  if [ ! -f "$LESSONS_FILE" ]; then
+    return
+  fi
+  tail -n 20 "$LESSONS_FILE" | sed 's/^/- /'
+}
+
+project_context_text() {
+  local project_name="$1"
+  if [ -z "$project_name" ]; then
+    return
+  fi
+
+  local project_key
+  project_key=$(safe_project_name "$project_name")
+  local project_file="$PROJECT_CONTEXT_DIR/${project_key}.log"
+  if [ ! -f "$project_file" ]; then
+    return
+  fi
+  tail -n 20 "$project_file" | sed 's/^/- /'
+}
+
+project_repo_override() {
+  local project_name="$1"
+  if [ -z "$project_name" ]; then
+    return
+  fi
+
+  local project_key
+  project_key=$(safe_project_name "$project_name")
+  local project_file="$PROJECT_CONTEXT_DIR/${project_key}.log"
+  if [ ! -f "$project_file" ]; then
+    return
+  fi
+
+  grep -Eo '~/projects/[A-Za-z0-9._/-]+' "$project_file" | tail -n 1 || true
 }
 
 cleanup_completed_tasks() {
@@ -389,6 +450,9 @@ if [ "$SLOTS_CODER" -gt 0 ]; then
       attempt_count=$(echo "$attempt_count" | xargs)
       project=$(echo "$project" | xargs)
       solution=$(echo "$solution" | xargs)
+      lessons_guidance=$(lessons_context_text)
+      project_guidance=$(project_context_text "$project")
+      project_repo_hint=$(project_repo_override "$project")
 
       if [ "$attempt_count" -ge "$MAX_ATTEMPTS" ]; then
         execute "UPDATE autonomous_tasks
@@ -427,18 +491,30 @@ Phase: $phase
 Plan: $plan
       Solution (if provided): ${solution:-<none>}
 
+    Global lessons learned:
+    ${lessons_guidance:-<none>}
+
+    MANDATORY project directives from /project:
+    ${project_guidance:-<none>}
+
+    Project repo override from /project notes (if present):
+    ${project_repo_hint:-<none>}
+
 Update task notes with:
 - Files changed
 - Tests run (command + result)
 - Docs updated (README/CHANGELOG/DEPLOYMENT_TASKS as needed)
 
 Git safety (required):
-- Target repo directory is: ~/projects/${project:-<unspecified>}.
-- Before any git operation, cd into the target repo and verify git rev-parse --is-inside-work-tree succeeds.
-- Verify origin remote matches the target project name:
-  - remote_url=\$(git remote get-url origin)
-  - remote_url must contain /${project} or :${project}.
-- If remote check fails or project is unspecified, do not push and return TASK_BLOCKED:$task_id:REMOTE_MISMATCH.
+- If project repo override is provided above, it takes precedence for all git operations and remote checks.
+- Repo hint directory is: ~/projects/${project:-<unspecified>}.
+- If the exact hint directory does not exist, resolve a best-match repository under ~/projects using this order:
+  1) exact project name
+  2) canonical project name (remove suffixes like _audit, _review, _test)
+  3) existing git repo whose origin remote contains the project or canonical token
+- Before any git operation, cd into the resolved repo and verify git rev-parse --is-inside-work-tree succeeds.
+- Verify origin remote is compatible with either the project name or canonical token.
+- If no clear repo can be resolved, do not push and return TASK_BLOCKED:$task_id:REPO_NOT_FOUND_OR_REMOTE_MISMATCH with candidates checked.
 - If copying from a base repo, never copy `.git` metadata.
 - Use copy commands that exclude .git (for example: rsync -a --exclude .git <src>/ <dst>/).
 
@@ -454,7 +530,7 @@ EOF
         response_file=$(mktemp)
         : > "$response_file"
         log "Launching agent for task $task_id (agent=$agent, timeout=${AGENT_TIMEOUT}s)"
-        openclaw_cmd_stream agent --agent "$agent" --message "$payload" --timeout "$AGENT_TIMEOUT" > "$response_file" 2>&1 &
+        openclaw_cmd_stream agent --agent "$agent" --message "$payload" --timeout "$AGENT_TIMEOUT" --thinking "$CODER_THINKING" > "$response_file" 2>&1 &
         cmd_pid=$!
         tail --pid="$cmd_pid" -n +1 -f "$response_file" &
         tail_pid=$!
@@ -570,6 +646,9 @@ if [ "$SLOTS_TESTER" -gt 0 ]; then
     echo "$READY_PHASES" | while IFS='|' read -r phase_project phase_key; do
       phase_project=$(echo "$phase_project" | xargs)
       phase_key=$(echo "$phase_key" | xargs)
+      lessons_guidance=$(lessons_context_text)
+      project_guidance=$(project_context_text "$phase_project")
+      project_repo_hint=$(project_repo_override "$phase_project")
 
       if [ "$phase_key" = "__NO_PHASE__" ]; then
         PHASE_TASKS=$(query "SELECT id, name, implementation_plan, COALESCE(project,'') FROM autonomous_tasks
@@ -638,6 +717,15 @@ Phase: ${phase_label:-<none>}
 Tasks in phase:
 $PHASE_TASKS
 
+Global lessons learned:
+${lessons_guidance:-<none>}
+
+MANDATORY project directives from /project:
+${project_guidance:-<none>}
+
+Project repo override from /project notes (if present):
+${project_repo_hint:-<none>}
+
 Run E2E + data validation for this phase.
 First output must be: "STEP 1: Boot check".
 Use this step order and timebox each step to ${TESTER_STEP_TIMEOUT}s:
@@ -666,12 +754,15 @@ Documentation is mandatory before pushing:
 - If no docs change is needed, include "DOCS_CHECK: no changes required" in your final response.
 
 Git safety before commit/push (required):
-- Target repo directory is: ~/projects/${phase_project:-<unspecified>}.
-- Before any git add/commit/push, cd into target repo and verify git rev-parse --is-inside-work-tree succeeds.
-- Verify origin remote matches target project name:
-  - remote_url=\$(git remote get-url origin)
-  - remote_url must contain /${phase_project} or :${phase_project}.
-- If remote check fails or project is unspecified, do not push and include REMOTE_MISMATCH details in final response.
+- If project repo override is provided above, it takes precedence for all git operations and remote checks.
+- Repo hint directory is: ~/projects/${phase_project:-<unspecified>}.
+- If the exact hint directory does not exist, resolve a best-match repository under ~/projects using this order:
+  1) exact project name
+  2) canonical project name (remove suffixes like _audit, _review, _test)
+  3) existing git repo whose origin remote contains the project or canonical token
+- Before any git add/commit/push, cd into resolved repo and verify git rev-parse --is-inside-work-tree succeeds.
+- Verify origin remote is compatible with either the phase project name or canonical token.
+- If unresolved, do not push and include REPO_NOT_FOUND_OR_REMOTE_MISMATCH details in final response.
 
 Always complete docs review/update before commit and push all changes.
 Commit message should be a short summary of what the phase was for.
@@ -688,7 +779,7 @@ EOF
         response_file=$(mktemp)
         : > "$response_file"
         log "Launching agent for phase $primary_id (agent=tester, timeout=${TESTER_TIMEOUT}s)"
-        openclaw_cmd_stream agent --agent "tester" --message "$payload" --timeout "$TESTER_TIMEOUT" > "$response_file" 2>&1 &
+        openclaw_cmd_stream agent --agent "tester" --message "$payload" --timeout "$TESTER_TIMEOUT" --thinking "$TESTER_THINKING" > "$response_file" 2>&1 &
         cmd_pid=$!
         tail --pid="$cmd_pid" -n +1 -f "$response_file" &
         tail_pid=$!

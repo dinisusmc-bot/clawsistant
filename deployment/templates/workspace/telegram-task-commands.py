@@ -184,6 +184,31 @@ def handle_command(text: str) -> str:
         return ""
     cmd = parts[0].lower()
 
+    status_aliases = {
+        "todo": "TODO",
+        "ready": "READY_FOR_TESTING",
+        "ready_for_testing": "READY_FOR_TESTING",
+        "ready-for-testing": "READY_FOR_TESTING",
+        "in_progress": "IN_PROGRESS",
+        "in-progress": "IN_PROGRESS",
+        "inprogress": "IN_PROGRESS",
+    }
+
+    def parse_unblock_args(tokens: list[str]) -> tuple[str, str]:
+        if not tokens:
+            return "TODO", ""
+
+        if len(tokens) >= 3:
+            phrase = " ".join(tokens[:3]).lower()
+            if phrase == "ready for testing":
+                return "READY_FOR_TESTING", " ".join(tokens[3:]).strip()
+
+        token = tokens[0].lower()
+        if token in status_aliases:
+            return status_aliases[token], " ".join(tokens[1:]).strip()
+
+        return "TODO", " ".join(tokens).strip()
+
     def list_tasks_by_status(status: str, label: str) -> str:
         rows = run_psql(
             "SELECT id, name, COALESCE(phase,''), COALESCE(assigned_agent,'') "
@@ -213,10 +238,19 @@ def handle_command(text: str) -> str:
             "/inprogress - list in-progress tasks (top 20)\n"
             "/tasks - summary counts for TODO/IN_PROGRESS/READY_FOR_TESTING\n"
             "/task <id> - show task status, phase, agent\n"
-            "/unblock <id> <solution> - requeue a blocked task with a solution (optional)\n"
-            "/unblock all - requeue all blocked tasks\n"
+            "/unblock <id> [status] [solution] - requeue blocked task (default status TODO)\n"
+            "  status options: TODO, READY_FOR_TESTING, IN_PROGRESS\n"
+            "/unblock all [status] [note] - requeue all blocked tasks (default status TODO)\n"
             "/retry <id> - alias for /unblock <id>\n"
-            "/digest now - send blocked tasks summary"
+            "/digest now - send blocked tasks summary\n"
+            "\n"
+            "Planner/router commands:\n"
+            "/plan <request> - queue planning request\n"
+            "/think <request> - optimize request, then queue planning\n"
+            "/prompt <request> - return optimized planning prompt only\n"
+            "/ask <question> - async planner answer via owner-message\n"
+            "/lesson <lesson learned> - save global lesson for future tasks\n"
+            "/project <project>|<note> - save project-specific context"
         )
 
     if cmd == "/blockers":
@@ -283,36 +317,41 @@ def handle_command(text: str) -> str:
 
     if cmd in ("/unblock", "/retry") and len(parts) >= 2 and parts[1].isdigit():
         task_id = int(parts[1])
-        solution = " ".join(parts[2:]).strip()
+        target_status, solution = parse_unblock_args(parts[2:])
         solution_sql = solution.replace("'", "''")
         count = run_psql(
             "WITH updated AS ("
-            "UPDATE autonomous_tasks SET status = 'TODO', blocked_reason = NULL, error_log = NULL, "
+            "UPDATE autonomous_tasks SET status = '%s', blocked_reason = NULL, error_log = NULL, "
             "assigned_agent = NULL, pid = NULL, started_at = NULL, attempt_count = 0, "
             "solution = CASE WHEN '%s' = '' THEN solution ELSE '%s' END "
             "WHERE id = %s AND status = 'BLOCKED' RETURNING id), "
             "deleted AS ("
             "DELETE FROM blocked_reasons WHERE task_id IN (SELECT id FROM updated) RETURNING task_id) "
-            "SELECT COUNT(*) FROM updated;" % (solution_sql, solution_sql, task_id)
+            "SELECT COUNT(*) FROM updated;" % (target_status, solution_sql, solution_sql, task_id)
         )
         if count == "1":
             if solution:
-                return f"Task {task_id} set to TODO with solution."
-            return f"Task {task_id} set to TODO."
+                return f"Task {task_id} set to {target_status} with solution."
+            return f"Task {task_id} set to {target_status}."
         return f"Task {task_id} not updated (not blocked or not found)."
 
-    if cmd == "/unblock" and len(parts) == 2 and parts[1].lower() == "all":
+    if cmd == "/unblock" and len(parts) >= 2 and parts[1].lower() == "all":
+        target_status, note = parse_unblock_args(parts[2:])
+        note_sql = note.replace("'", "''")
         count = run_psql(
             "WITH updated AS ("
-            "UPDATE autonomous_tasks SET status = 'TODO', blocked_reason = NULL, error_log = NULL, "
-            "assigned_agent = NULL, pid = NULL, started_at = NULL, attempt_count = 0, solution = NULL "
+            "UPDATE autonomous_tasks SET status = '%s', blocked_reason = NULL, error_log = NULL, "
+            "assigned_agent = NULL, pid = NULL, started_at = NULL, attempt_count = 0, "
+            "solution = CASE WHEN '%s' = '' THEN solution ELSE '%s' END "
             "WHERE status = 'BLOCKED' RETURNING id), "
             "deleted AS ("
             "DELETE FROM blocked_reasons WHERE task_id IN (SELECT id FROM updated) RETURNING task_id) "
-            "SELECT COUNT(*) FROM updated;"
+            "SELECT COUNT(*) FROM updated;" % (target_status, note_sql, note_sql)
         )
         if count:
-            return f"Requeued {count} blocked tasks."
+            if note:
+                return f"Requeued {count} blocked tasks to {target_status} with note."
+            return f"Requeued {count} blocked tasks to {target_status}."
         return "No blocked tasks to requeue."
 
     if cmd == "/digest" and len(parts) >= 2 and parts[1].lower() == "now":
