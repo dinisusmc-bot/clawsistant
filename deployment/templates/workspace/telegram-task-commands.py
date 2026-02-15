@@ -235,6 +235,7 @@ def handle_command(text: str) -> str:
             "/help - show this help\n"
             "/blockers - list blocked tasks (top 20)\n"
             "/todo - list todo tasks (top 20)\n"
+            "/readyfortesting - list ready-for-testing tasks (top 20)\n"
             "/inprogress - list in-progress tasks (top 20)\n"
             "/tasks - summary counts for TODO/IN_PROGRESS/READY_FOR_TESTING\n"
             "/task <id> - show task status, phase, agent\n"
@@ -274,6 +275,9 @@ def handle_command(text: str) -> str:
 
     if cmd == "/todo":
         return list_tasks_by_status("TODO", "todo")
+
+    if cmd == "/readyfortesting":
+        return list_tasks_by_status("READY_FOR_TESTING", "ready-for-testing")
 
     if cmd == "/inprogress":
         return list_tasks_by_status("IN_PROGRESS", "in-progress")
@@ -387,6 +391,7 @@ def is_local_command(text: str) -> bool:
         "help",
         "/blockers",
         "/todo",
+        "/readyfortesting",
         "/inprogress",
         "/tasks",
         "/task",

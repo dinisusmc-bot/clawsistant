@@ -738,6 +738,13 @@ Before each step, print "STEP <n>: <name>".
 After each step, print "STEP <n> RESULT: PASS/FAIL - <short reason>".
 If failures occur, create coder tasks with repro steps and logs.
 
+Phase test ownership (required):
+- Tester must create or update automated tests for the current phase scope before final completion when tests are missing, stale, or mismatched to current architecture.
+- Prioritize phase-scoped tests over legacy unrelated suites.
+- If existing tests target removed/renamed services, replace or quarantine those tests and note what changed.
+- Run the updated phase tests and report command + result.
+- Include "PHASE_TESTS_UPDATED: yes|no" and a short reason in final response.
+
 Tester code changes:
 - You may make small, targeted fixes to address issues found during testing.
 - If the fix is more than a small change or requires refactoring, do not implement it; create a coder task with repro steps.
