@@ -250,6 +250,7 @@ def handle_command(text: str) -> str:
             "/think <request> - optimize request, then queue planning\n"
             "/prompt <request> - return optimized planning prompt only\n"
             "/ask <question> - async planner answer via owner-message\n"
+            "/adhoc <instruction> - one-off async coder run (no task DB entry)\n"
             "/lesson <lesson learned> - save global lesson for future tasks\n"
             "/project <project>|<note> - save project-specific context"
         )

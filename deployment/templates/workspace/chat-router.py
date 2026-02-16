@@ -24,6 +24,7 @@ CHAT_ROUTER_PORT = int(os.environ.get("CHAT_ROUTER_PORT", "18801"))
 ALLOWED_ASK_AGENTS = {"planner", "coder", "tester"}
 ASK_TIMEOUT_SEC = int(os.environ.get("CHAT_ROUTER_ASK_TIMEOUT_SEC", "180"))
 THINK_TIMEOUT_SEC = int(os.environ.get("CHAT_ROUTER_THINK_TIMEOUT_SEC", "240"))
+ADHOC_TIMEOUT_SEC = int(os.environ.get("CHAT_ROUTER_ADHOC_TIMEOUT_SEC", "1200"))
 ASK_DEFAULT_AGENT = "planner"
 TELEGRAM_NOTIFY_SCRIPT = str(Path.home() / ".openclaw" / "workspace" / "telegram-notify.sh")
 AGENT_CONTEXT_DIR = Path.home() / ".openclaw" / "workspace" / "agent-context"
@@ -508,24 +509,81 @@ def ask_agent_async_worker(agent: str, question: str) -> None:
     send_owner_message(agent, question, answer_text)
 
 
-def queue_ask_agent(question: str) -> str:
-    question_text = question.strip()
-    if not question_text:
-        return "Usage: /ask <question>"
+def build_async_adhoc_prompt(instruction: str) -> str:
+    return (
+        "You are executing a one-off adhoc coding instruction from the owner.\n"
+        "Agent role: coder\n"
+        f"Owner instruction: {instruction}\n\n"
+        "Rules:\n"
+        "1) Execute the request directly in the target repository.\n"
+        "2) Do NOT create or modify task-table entries as part of this request.\n"
+        "3) Keep changes focused and minimal for the stated edge case.\n"
+        "4) End with a concise summary of files changed and verification performed.\n"
+        "5) Return only final answer content; no channel routing metadata."
+    )
 
-    parts = question_text.split(maxsplit=1)
-    if len(parts) == 2 and parts[0].lower() in ALLOWED_ASK_AGENTS:
-        question_text = parts[1].strip()
-    if not question_text:
-        return "Usage: /ask <question>"
+
+def adhoc_coder_worker(instruction: str) -> None:
+    prompt = build_async_adhoc_prompt(instruction)
+    cmd = agent_cmd("coder", prompt, ADHOC_TIMEOUT_SEC)
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=ADHOC_TIMEOUT_SEC,
+        )
+        answer_text = (result.stdout or "").strip()
+        if not answer_text:
+            answer_text = "".join([result.stdout or "", "\n", result.stderr or ""]).strip()
+    except subprocess.TimeoutExpired:
+        answer_text = f"Adhoc coder run timed out after {ADHOC_TIMEOUT_SEC}s."
+
+    if not answer_text:
+        answer_text = "Coder completed adhoc request without output."
+    if len(answer_text) > 3500:
+        answer_text = answer_text[:3500] + "\n...<truncated>"
+    send_owner_message("coder", instruction, answer_text)
+
+
+def queue_adhoc_coder(instruction: str) -> str:
+    request_text = instruction.strip()
+    if not request_text:
+        return "Usage: /adhoc <one-off instruction>"
 
     thread = threading.Thread(
-        target=ask_agent_async_worker,
-        args=(ASK_DEFAULT_AGENT, question_text),
+        target=adhoc_coder_worker,
+        args=(request_text,),
         daemon=True,
     )
     thread.start()
-    return ""
+    preview = request_text.replace("\n", " ")
+    if len(preview) > 120:
+        preview = preview[:117] + "..."
+    return f"Queued adhoc coder request: {preview}. You will receive the result via owner-message."
+
+
+def queue_ask_agent(question: str) -> tuple[str, str]:
+    question_text = question.strip()
+    if not question_text:
+        return "", "Usage: /ask <question>"
+
+    target_agent = ASK_DEFAULT_AGENT
+
+    parts = question_text.split(maxsplit=1)
+    if len(parts) == 2 and parts[0].lower() in ALLOWED_ASK_AGENTS:
+        target_agent = parts[0].lower()
+        question_text = parts[1].strip()
+    if not question_text:
+        return "", "Usage: /ask <agent> <question>"
+
+    thread = threading.Thread(
+        target=ask_agent_async_worker,
+        args=(target_agent, question_text),
+        daemon=True,
+    )
+    thread.start()
+    return target_agent, ""
 
 
 def send_owner_message(agent: str, question: str, response: str) -> tuple[bool, str]:
@@ -643,12 +701,20 @@ def route_text(text: str) -> str:
         project_note = stripped[8:].strip()
         return add_project_note(project_note)
 
+    if lowered.startswith("/adhoc"):
+        adhoc_text = stripped[6:].strip()
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=agent kind=adhoc agent=coder")
+        return queue_adhoc_coder(adhoc_text)
+
     if lowered.startswith("/ask"):
         question = stripped[4:].strip()
         if not question:
-            return "Usage: /ask <question>"
-        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=agent kind=ask agent={ASK_DEFAULT_AGENT}")
-        return queue_ask_agent(question)
+            return "Usage: /ask <question> or /ask <agent> <question>"
+        ask_agent_name, ask_result = queue_ask_agent(question)
+        if ask_result:
+            return ask_result
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=agent kind=ask agent={ask_agent_name or ASK_DEFAULT_AGENT}")
+        return ""
 
     if "weather" in lowered:
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weather")

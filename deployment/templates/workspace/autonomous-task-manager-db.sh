@@ -42,9 +42,13 @@ TEST_CLEANUP_AFTER=${TEST_CLEANUP_AFTER:-0}
 
 OPENCLAW_NODE=${OPENCLAW_NODE:-/usr/bin/node}
 OPENCLAW_CLI=${OPENCLAW_CLI:-$HOME/.local/openclaw/node_modules/openclaw/dist/index.js}
+OPENCLAW_HOME=${OPENCLAW_HOME:-$HOME/.openclaw}
+OPENCLAW_CONFIG=${OPENCLAW_CONFIG:-$OPENCLAW_HOME/.openclaw/openclaw.json}
 PLANNER_TEMP=${PLANNER_TEMP:-0.25}
 CODER_TEMP=${CODER_TEMP:-0.18}
 TESTER_TEMP=${TESTER_TEMP:-0.10}
+
+export OPENCLAW_HOME OPENCLAW_CONFIG
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$AGENT_CONTEXT_DIR" "$PROJECT_CONTEXT_DIR"
@@ -340,6 +344,7 @@ log "=== Autonomous Task Manager Starting (Database Mode) ==="
 log "Working directory: $(pwd)"
 log "OPENCLAW_NODE=$OPENCLAW_NODE"
 log "OPENCLAW_CLI=$OPENCLAW_CLI"
+log "OPENCLAW_CONFIG=$OPENCLAW_CONFIG"
 
 normalize_statuses
 
@@ -515,7 +520,7 @@ Git safety (required):
 - Before any git operation, cd into the resolved repo and verify git rev-parse --is-inside-work-tree succeeds.
 - Verify origin remote is compatible with either the project name or canonical token.
 - If no clear repo can be resolved, do not push and return TASK_BLOCKED:$task_id:REPO_NOT_FOUND_OR_REMOTE_MISMATCH with candidates checked.
-- If copying from a base repo, never copy `.git` metadata.
+- If copying from a base repo, never copy .git metadata.
 - Use copy commands that exclude .git (for example: rsync -a --exclude .git <src>/ <dst>/).
 
 If behavior, setup, or usage changes, update repo documentation accordingly.
@@ -738,6 +743,18 @@ Before each step, print "STEP <n>: <name>".
 After each step, print "STEP <n> RESULT: PASS/FAIL - <short reason>".
 If failures occur, create coder tasks with repro steps and logs.
 
+Major issue escalation (required):
+- If you identify a major issue outside tester scope, create one or more follow-up tasks directly in autonomous_tasks.
+- Follow-up task requirements:
+  - project = current project
+  - phase = current phase
+  - status = TODO
+  - name = concise issue title
+  - implementation_plan = clear proposed solution path
+  - notes = concrete repro evidence and failure context
+- This is mandatory for large fixes so the same phase is not tested again until those new tasks return to READY_FOR_TESTING.
+- After creating follow-up task(s), return TASK_BLOCKED:$primary_id:FOLLOWUP_TASKS_CREATED with task ids in your summary.
+
 Phase test ownership (required):
 - Tester must create or update automated tests for the current phase scope before final completion when tests are missing, stale, or mismatched to current architecture.
 - Prioritize phase-scoped tests over legacy unrelated suites.
@@ -748,6 +765,10 @@ Phase test ownership (required):
 Tester code changes:
 - You may make small, targeted fixes to address issues found during testing.
 - If the fix is more than a small change or requires refactoring, do not implement it; create a coder task with repro steps.
+- You may update top-level docker-compose files (docker-compose.yml and related override files) to unblock environment boot and phase testing.
+- You may run docker compose commands (up/down/restart/logs) as needed to establish a valid test environment.
+- Dockerfile/base-image/complex container build logic remains coder-owned; only do minimal Dockerfile edits when they are tiny unblockers for immediate phase testing.
+- If Docker changes exceed small compose-level fixes, create a coder task with exact repro, failing command, and proposed direction.
 
 Non-blocking guardrails:
 - Preflight once before STEP 1: verify DB reachable, required containers running, and required init files exist (e.g., /app/init_db.py).
@@ -765,11 +786,12 @@ Git safety before commit/push (required):
 - Repo hint directory is: ~/projects/${phase_project:-<unspecified>}.
 - If the exact hint directory does not exist, resolve a best-match repository under ~/projects using this order:
   1) exact project name
-  2) canonical project name (remove suffixes like _audit, _review, _test)
-  3) existing git repo whose origin remote contains the project or canonical token
-- Before any git add/commit/push, cd into resolved repo and verify git rev-parse --is-inside-work-tree succeeds.
-- Verify origin remote is compatible with either the phase project name or canonical token.
-- If unresolved, do not push and include REPO_NOT_FOUND_OR_REMOTE_MISMATCH details in final response.
+  2) canonical project name (remove suffixes like _audit, _review, _test, _cleanup)
+  3) fuzzy normalized-name match (ignore separators like _, -, and spaces)
+  4) any existing git repo under ~/projects with a plausible origin remote
+- Before any git add/commit/push, cd into the resolved repo and verify git rev-parse --is-inside-work-tree succeeds.
+- Remote compatibility is a soft check: if origin does not contain project tokens but repo is the best local canonical/fuzzy match, continue and include REMOTE_WARNING in final response.
+- Block only when no working git repo can be resolved at all; in that case return TASK_BLOCKED:$primary_id:PUSH_FAILED:REPO_NOT_FOUND with candidates checked.
 
 Always complete docs review/update before commit and push all changes.
 Commit message should be a short summary of what the phase was for.
@@ -777,6 +799,11 @@ Commit message should be a short summary of what the phase was for.
 Return these markers in your final response:
 - TASK_COMPLETE:$primary_id
 - GIT_PUSHED:$primary_id:<branch>:<short_sha>
+
+Marker format is strict:
+- The LAST non-empty line must be exactly one marker line beginning with TASK_COMPLETE: or TASK_BLOCKED:.
+- If phase cannot be completed now, always end with TASK_BLOCKED:$primary_id:<reason>.
+- Include any context/details above the final marker line.
 
 If push cannot be completed, return:
 - TASK_BLOCKED:$primary_id:PUSH_FAILED:<reason>
@@ -836,7 +863,22 @@ EOF
         rm -f "$response_file"
         echo "$response"
 
-        if echo "$response" | grep -qi -E "TASK_COMPLETE:$primary_id|TASK[ _-]?COMPLETE" \
+        agent_launch_error=$(echo "$response" | grep -Eim1 "Unknown agent id|Gateway agent failed" || true)
+
+        if [ -n "$agent_launch_error" ]; then
+          reason="Tester agent launch failure: $agent_launch_error"
+          reason=${reason//"'"/"''"}
+          context=$(task_context "$primary_id")
+          record_blocked_reason "$primary_id" "${reason}"
+          execute "UPDATE autonomous_tasks
+                 SET status = 'BLOCKED',
+                   pid = NULL,
+                   assigned_agent = NULL,
+                   blocked_reason = 'Tester agent launch failure; requires human fix',
+                   error_log = '$reason'
+                 WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
+          send_notification blocker "$primary_id" "$primary_name" "${context}\nTester agent launch failed: ${agent_launch_error}\nFix agent config/service environment, then /unblock $primary_id <solution>."
+        elif echo "$response" | grep -qi -E "TASK_COMPLETE:$primary_id|TASK[ _-]?COMPLETE" \
           && echo "$response" | grep -qi "GIT_PUSHED:$primary_id:"; then
             execute "UPDATE autonomous_tasks
                  SET status = 'COMPLETE',
@@ -846,18 +888,21 @@ EOF
           send_notification complete "$primary_id" "$primary_name" "phase complete"
           cleanup_project_test_env "$phase_project"
         elif echo "$response" | grep -qi -E "TASK_COMPLETE:$primary_id|TASK[ _-]?COMPLETE"; then
-          context=$(task_context "$primary_id")
-          record_blocked_reason "$primary_id" "Tester missing git push confirmation marker"
-            execute "UPDATE autonomous_tasks
-                 SET status = 'READY_FOR_TESTING',
+          execute "UPDATE autonomous_tasks
+                 SET status = 'COMPLETE',
                    pid = NULL,
-                   assigned_agent = NULL,
-                   blocked_reason = NULL,
-                   error_log = 'Tester marked complete without GIT_PUSHED marker'
+                   completed_at = CURRENT_TIMESTAMP
                  WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
-          send_notification ready "$primary_id" "$primary_name" "${context}\nTester marked complete without push confirmation (non-blocking)"
-        elif echo "$response" | grep -q "TASK_BLOCKED:$primary_id:"; then
+          send_notification complete "$primary_id" "$primary_name" "phase complete (tester validated, no push needed)"
+          cleanup_project_test_env "$phase_project"
+        elif echo "$response" | grep -qi -E "TASK_BLOCKED:$primary_id:|TASK[ _-]?BLOCKED:"; then
           reason=$(echo "$response" | sed -n "s/.*TASK_BLOCKED:$primary_id:\(.*\)$/\1/p" | head -n 1)
+          if [ -z "$reason" ]; then
+            reason=$(echo "$response" | sed -n "s/.*TASK[ _-]*BLOCKED:\(.*\)$/\1/p" | head -n 1)
+          fi
+          if [ -z "$reason" ]; then
+            reason="Tester reported blocked (marker present, reason not parsed)"
+          fi
           reason=${reason//"'"/"''"}
           context=$(task_context "$primary_id")
           updated_attempt_count=$(query "SELECT COALESCE(attempt_count,0) FROM autonomous_tasks WHERE id = $primary_id;" | xargs)

@@ -76,6 +76,10 @@
           "__HOME__/.openclaw/memory/notes"
         ],
         "provider": "openai",
+        "remote": {
+          "baseUrl": "__OPENAI_BASE_URL__",
+          "apiKey": "__OPENAI_API_KEY__"
+        },
         "model": "bge-small-en-v1.5",
         "sync": {
           "onSessionStart": true,

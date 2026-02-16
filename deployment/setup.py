@@ -150,6 +150,7 @@ def main() -> int:
         "__TELEGRAM_ALLOW_FROM__": env["TELEGRAM_ALLOW_FROM"],
         "__OPENCLAW_CLI__": openclaw_cli,
         "__PATH__": os.environ.get("PATH", "/usr/bin:/bin"),
+        "__OPENCLAW_HOME__": str(home / ".openclaw"),
     }
 
     openclaw_config = render_template(TEMPLATES_DIR / "openclaw.json", replacements)
@@ -181,6 +182,7 @@ def main() -> int:
         f"PRIMARY_VISION_MODEL={env.get('PRIMARY_VISION_MODEL', 'internvl')}",
         f"EMBEDDINGS_MODEL={env.get('EMBEDDINGS_MODEL', 'bge-small-en-v1.5')}",
         f"MAX_ATTEMPTS={env.get('MAX_ATTEMPTS', '2')}",
+        f"TESTER_MAX_ATTEMPTS={env.get('TESTER_MAX_ATTEMPTS', '3')}",
         f"VERBOSE_TASK_LOGS={env.get('VERBOSE_TASK_LOGS', '1')}",
         f"TASK_HEARTBEAT_SEC={env.get('TASK_HEARTBEAT_SEC', '30')}",
         f"TEST_CLEANUP_AFTER={env.get('TEST_CLEANUP_AFTER', '1')}",

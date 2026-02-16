@@ -11,6 +11,7 @@ KillMode=process
 Environment="OPENAI_API_KEY=__OPENAI_API_KEY__"
 Environment="OPENAI_BASE_URL=__OPENAI_BASE_URL__"
 Environment=HOME=__HOME__
+Environment=OPENCLAW_HOME=__HOME__/.openclaw
 Environment="PATH=__PATH__"
 Environment=OPENCLAW_GATEWAY_PORT=__OPENCLAW_GATEWAY_PORT__
 Environment=OPENCLAW_GATEWAY_TOKEN=__OPENCLAW_GATEWAY_TOKEN__
