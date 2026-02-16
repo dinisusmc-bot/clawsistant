@@ -78,9 +78,16 @@
         "provider": "openai",
         "remote": {
           "baseUrl": "__OPENAI_BASE_URL__",
-          "apiKey": "__OPENAI_API_KEY__"
+          "apiKey": "__OPENAI_API_KEY__",
+          "batch": {
+            "enabled": false
+          }
         },
         "model": "bge-small-en-v1.5",
+        "chunking": {
+          "tokens": 256,
+          "overlap": 48
+        },
         "sync": {
           "onSessionStart": true,
           "onSearch": true,
