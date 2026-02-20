@@ -191,6 +191,7 @@ def main() -> int:
         f"CHAT_ROUTER_PORT={env.get('CHAT_ROUTER_PORT', '18801')}",
         f"CHAT_ROUTER_URL={env.get('CHAT_ROUTER_URL', 'http://127.0.0.1:18801/route')}",
         f"CHAT_ROUTER_ASK_TIMEOUT_SEC={env.get('CHAT_ROUTER_ASK_TIMEOUT_SEC', '180')}",
+        f"OPENCLAW_HOME={home / '.openclaw'}",
         f"TELEGRAM_ACK_REACTION={env.get('TELEGRAM_ACK_REACTION', '✅')}",
         f"MODEL_HEALTH_RETRIES={env.get('MODEL_HEALTH_RETRIES', '2')}",
         f"MODEL_HEALTH_CONNECT_TIMEOUT_SEC={env.get('MODEL_HEALTH_CONNECT_TIMEOUT_SEC', '5')}",
