@@ -178,7 +178,7 @@ def main() -> int:
         f"OPENAI_API_KEY={env.get('OPENAI_API_KEY', '')}",
         f"OPENAI_TOOLS_API_KEY={env.get('OPENAI_TOOLS_API_KEY', env.get('OPENAI_API_KEY', ''))}",
         f"OPENAI_BASE_URL={env.get('OPENAI_BASE_URL', 'http://ai-services:8010/v1')}",
-        f"PRIMARY_TEXT_MODEL={env.get('PRIMARY_TEXT_MODEL', 'qwen3-coder')}",
+        f"PRIMARY_TEXT_MODEL={env.get('PRIMARY_TEXT_MODEL', 'minimax-m2.5')}",
         f"PRIMARY_VISION_MODEL={env.get('PRIMARY_VISION_MODEL', 'internvl')}",
         f"EMBEDDINGS_MODEL={env.get('EMBEDDINGS_MODEL', 'bge-small-en-v1.5')}",
         f"MAX_ATTEMPTS={env.get('MAX_ATTEMPTS', '2')}",

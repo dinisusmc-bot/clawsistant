@@ -22,7 +22,7 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "qwen3-coder",
+            "id": "minimax-m2.5",
             "name": "Primary Text Model",
             "reasoning": false,
             "input": [
@@ -34,8 +34,8 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 220000,
-            "maxTokens": 200000
+            "contextWindow": 150000,
+            "maxTokens": 128000
           },
           {
             "id": "internvl",
@@ -60,7 +60,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "litellm/qwen3-coder"
+        "primary": "litellm/minimax-m2.5"
       },
       "imageModel": {
         "primary": "litellm/internvl"
