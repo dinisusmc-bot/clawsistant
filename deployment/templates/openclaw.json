@@ -117,7 +117,7 @@
       {
         "id": "planner",
         "default": true,
-        "name": "Planner/Delegator",
+        "name": "Planner",
         "subagents": {
           "allowAgents": [
             "coder",
@@ -127,11 +127,11 @@
       },
       {
         "id": "coder",
-        "name": "Coder"
+        "name": "Doer"
       },
       {
         "id": "tester",
-        "name": "Tester"
+        "name": "Reviewer"
       }
     ]
   },
@@ -180,10 +180,7 @@
       "denyCommands": [
         "camera.snap",
         "camera.clip",
-        "screen.record",
-        "calendar.add",
-        "contacts.add",
-        "reminders.add"
+        "screen.record"
       ]
     }
   },

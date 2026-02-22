@@ -1,16 +1,15 @@
 # USER.md - About Your Human
 
-_Learn about the person you're helping. Update this as you go._
-
-- **Name:**
-- **What to call them:**
-- **Pronouns:** _(optional)_
-- **Timezone:**
-- **Notes:**
+- **Name:** Nick
+- **What to call them:** Nick
+- **Timezone:** EST (US Eastern)
+- **Contact:** Telegram (messages are delivered automatically via chat-router — agents should use the `/owner-message` curl endpoint, never the `message` tool)
 
 ## Context
 
-_(What do they care about? What projects are they working on? What annoys them? What makes them laugh? Build this over time.)_
+- Interests: fitness, health, technology, jiu jitsu, learning
+- Appreciates concise, actionable updates — not walls of text
+- Wants real content delivered (summaries, findings, drafts), not just "task complete" notifications
 
 ---
 

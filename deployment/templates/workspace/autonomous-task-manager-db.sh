@@ -1,6 +1,6 @@
 #!/bin/bash
 # Autonomous Task Manager - PostgreSQL Version
-# Dispatches tasks to coder/tester via OpenClaw agent CLI
+# Dispatches tasks to doer/reviewer agents via OpenClaw agent CLI
 
 set -euo pipefail
 
@@ -147,11 +147,98 @@ send_notification() {
   local task_name="$3"
   local details="$4"
 
+  # Only send notifications for blockers and owner-messages.
+  # Skip noisy status updates (started, complete, ready, reset).
+  case "$status" in
+    blocker|blocked-summary|owner-message) ;;
+    *) return 0 ;;
+  esac
+
   if [ -x "$TELEGRAM_NOTIFY" ]; then
     bash "$TELEGRAM_NOTIFY" "$status" "$task_id" "$task_name" "$details"
   elif [ -f "$DISCORD_NOTIFY" ]; then
     bash "$DISCORD_NOTIFY" "$status" "$task_id" "$task_name" "$details"
   fi
+}
+
+# Deliver phase results to the owner via chat-router /owner-message.
+# Sends each deliverable file as a separate message with a friendly title.
+deliver_phase_results() {
+  local project="$1"
+  local phase_name="$2"
+  local project_dir="$HOME/projects/$project"
+
+  if [ ! -d "$project_dir" ]; then
+    return 0
+  fi
+
+  local file_count=0
+
+  for dir in "$project_dir/drafts" "$project_dir/research" "$project_dir/analysis" "$project_dir/schedule" "$project_dir/leads"; do
+    if [ -d "$dir" ]; then
+      for f in "$dir"/*.md; do
+        [ -f "$f" ] || continue
+        local basename
+        basename=$(basename "$f")
+
+        # Generate a friendly title from the filename
+        local title
+        title=$(python3 -c "
+import sys
+name = sys.argv[1].rsplit('.', 1)[0]  # strip .md
+# Map known patterns to friendly titles
+mappings = {
+    'tech-articles': '🔬 State of the Art Tech Updates',
+    'weekly-tech-update': '🔬 State of the Art Tech Updates',
+    'tech-podcasts': '🎙️ Trending Tech News & Podcasts',
+    'market-news': '📈 Stock Market Shifting Implications',
+    'market-impact': '📈 Stock Market Shifting Implications',
+    'real-estate': '🏠 Real Estate & Rental Owner Updates',
+    'rental': '🏠 Real Estate & Rental Owner Updates',
+    'housing': '🏠 Real Estate & Rental Owner Updates',
+    'property': '🏠 Real Estate & Rental Owner Updates',
+}
+matched = None
+for key, label in mappings.items():
+    if key in name.lower():
+        matched = label
+        break
+if not matched:
+    # Fallback: titlecase the filename
+    matched = '📋 ' + name.replace('-', ' ').replace('_', ' ').title()
+print(matched)
+" "$basename")
+
+        # Read file content (up to 3800 chars to stay under Telegram's 4096 limit)
+        local file_content
+        file_content=$(head -c 3800 "$f")
+
+        if [ -z "$file_content" ]; then
+          continue
+        fi
+
+        # Send each file as a separate message
+        local payload
+        payload=$(python3 -c "
+import json, sys
+content = sys.stdin.read().strip()
+print(json.dumps({
+    'agent': 'reviewer',
+    'question': sys.argv[1],
+    'response': content
+}))" "$title" <<< "$file_content")
+
+        curl -sS -X POST "http://127.0.0.1:18801/owner-message" \
+          -H "Content-Type: application/json" \
+          -d "$payload" >/dev/null 2>&1 || true
+
+        file_count=$((file_count + 1))
+
+        # Small delay between messages to avoid Telegram rate limits
+        sleep 1
+      done
+    fi
+  done
 }
 
 record_blocked_reason() {
@@ -886,6 +973,7 @@ EOF
                    completed_at = CURRENT_TIMESTAMP
                  WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
           send_notification complete "$primary_id" "$primary_name" "phase complete"
+          deliver_phase_results "$phase_project" "$phase_key"
           cleanup_project_test_env "$phase_project"
         elif echo "$response" | grep -qi -E "TASK_COMPLETE:$primary_id|TASK[ _-]?COMPLETE"; then
           execute "UPDATE autonomous_tasks
@@ -894,6 +982,7 @@ EOF
                    completed_at = CURRENT_TIMESTAMP
                  WHERE $phase_filter AND status IN ('READY_FOR_TESTING','IN_PROGRESS');"
           send_notification complete "$primary_id" "$primary_name" "phase complete (tester validated, no push needed)"
+          deliver_phase_results "$phase_project" "$phase_key"
           cleanup_project_test_env "$phase_project"
         elif echo "$response" | grep -qi -E "TASK_BLOCKED:$primary_id:|TASK[ _-]?BLOCKED:"; then
           reason=$(echo "$response" | sed -n "s/.*TASK_BLOCKED:$primary_id:\(.*\)$/\1/p" | head -n 1)

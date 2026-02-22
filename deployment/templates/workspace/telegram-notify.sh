@@ -122,6 +122,9 @@ case "$TYPE" in
     "blocked-summary")
         message="🚧 *Blocked Tasks Summary*\n\n$REASON"
         ;;
+    "agent-question")
+        message="❓ *Agent Question*\n\nFrom: \`$TASK_NAME\`\n\n$REASON\n\n_Reply with your answer or send /pending to see all._"
+        ;;
     "reset")
         message="🔁 *Task Reset*\n\nTask: \`$TASK_NAME\`\nID: \`$TASK_ID\`\n\n$REASON"
         ;;

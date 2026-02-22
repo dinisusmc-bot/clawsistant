@@ -91,3 +91,19 @@ CREATE TRIGGER autonomous_tasks_updated_at_trigger
   BEFORE UPDATE ON autonomous_tasks
   FOR EACH ROW
   EXECUTE FUNCTION update_autonomous_tasks_updated_at();
+
+-- Pending questions: agents ask the owner for clarification
+CREATE TABLE IF NOT EXISTS pending_questions (
+  id SERIAL PRIMARY KEY,
+  agent TEXT NOT NULL,
+  task_id INTEGER REFERENCES autonomous_tasks(id) ON DELETE SET NULL,
+  question TEXT NOT NULL,
+  answer TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending, answered, expired
+  telegram_message_id BIGINT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  answered_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_questions_status ON pending_questions(status);
+CREATE INDEX IF NOT EXISTS idx_pending_questions_agent_created ON pending_questions(agent, created_at DESC);

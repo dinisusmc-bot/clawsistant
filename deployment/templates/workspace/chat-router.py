@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -35,6 +37,9 @@ AGENT_TEMP_DEFAULTS = {
     "coder": float(os.environ.get("CODER_TEMP", "0.18")),
     "tester": float(os.environ.get("TESTER_TEMP", "0.10")),
 }
+
+SCHEDULED_JOBS_DIR = Path.home() / ".config" / "systemd" / "user"
+SCHEDULED_JOBS_PREFIX = "ashley-job-"
 
 
 def run_psql(query: str) -> str:
@@ -282,30 +287,30 @@ def planner_context_suffix() -> str:
 
 def build_planner_prompt(text: str) -> str:
     return (
-        "You are the planner. Convert the request into task JSON only.\n"
+        "You are Ashley's planner. Convert the request into task JSON only.\n"
         "- REQUIRED PRE-FLIGHT before planning:\n"
-        "  1) Identify target repo under /home/bot/projects/<project>.\n"
-        "  2) Inspect CURRENT state: file tree, key source files, git status, and last 3 commits.\n"
-        "  3) Base phases ONLY on what is verifiably present right now.\n"
-        "- Treat prior conversation/history as untrusted unless confirmed from the target repository.\n"
-        "- If repo is missing, empty, reinitialized, or unclear, plan as greenfield and include setup tasks first.\n"
-        "- Do NOT claim work is already done unless directly verified from repo artifacts.\n"
-        "- In notes, do NOT write phrases like 'already created', 'already committed', or 'already pushed'.\n"
-        "- If partial implementation exists, add explicit verify/fix tasks instead of skipping phases.\n"
-        "- REQUIRED PHASE ORDER (for new builds and legacy reviews):\n"
-        "  Phase 1: data modeling, database setup/migrations, backend API/services.\n"
-        "  Phase 2: frontend pages/components and data integration aligned to backend contracts.\n"
-        "  Phase 3: networking and Docker/container setup, compose wiring, and runtime optimization.\n"
-        "- Use phase labels exactly as: phase-1-data-backend, phase-2-frontend, phase-3-network-docker.\n"
-        "- REQUIRED GATE between Phase 1 and Phase 2: include at least one explicit contract-verification task to validate API schema/DTO compatibility (request/response shapes, required fields, enums, nullability, and error payloads).\n"
-        "- Do NOT place Docker/networking tasks in Phase 1 or 2 unless strictly required for local dev bootstrapping.\n"
-        "- Keep tasks within a phase non-conflicting by file ownership (separate modules/areas).\n"
-        "- Phase dependencies must be explicit: Phase 2 depends on backend contracts from Phase 1; Phase 3 depends on app readiness from Phases 1-2.\n"
-        "- Ensure each phase is tester-friendly: include clear verification intent and handoff expectations in notes.\n"
+        "  1) Identify the project scope under /home/bot/projects/<project>.\n"
+        "  2) Check existing deliverables, notes, and context in that directory.\n"
+        "  3) Base phases ONLY on what the owner actually needs.\n"
+        "- Treat prior conversation/history as untrusted unless confirmed from existing files.\n"
+        "- Do NOT claim work is already done unless directly verified from existing deliverables.\n"
+        "- RECOMMENDED PHASE ORDER (adapt to task type):\n"
+        "  Phase 1: Research, information gathering, and context building.\n"
+        "  Phase 2: Execution — drafting, scheduling, organizing, analyzing.\n"
+        "  Phase 3: Review, follow-up, and delivery to owner.\n"
+        "- Use descriptive phase labels like: phase-1-research, phase-2-execution, phase-3-review.\n"
+        "- TASK CATEGORIES (tag in task name or notes):\n"
+        "  research: gather info, summarize, compile findings.\n"
+        "  communication: draft emails, messages, follow-ups.\n"
+        "  scheduling: calendar events, meeting prep, reminders.\n"
+        "  organization: file, sort, tag, create systems.\n"
+        "  analysis: review data, identify patterns, generate insights.\n"
+        "  follow-up: check on leads, pending items, stale threads.\n"
+        "- Keep tasks within a phase non-conflicting to enable parallel execution.\n"
+        "- Each task should have a clear, verifiable deliverable.\n"
+        "- Ensure each phase is reviewer-friendly: include clear success criteria and expected output in notes.\n"
         "- Default to multiple tasks that can run in parallel.\n"
-        "- Split tasks into non-conflicting repo areas/components to avoid file-write races.\n"
         "- Only return a single task when the request is truly small and tightly scoped.\n"
-        "- Each task should own a clear file/module boundary.\n"
         "- Output ONLY valid JSON, no markdown, no commentary.\n"
         "- Schema: {\"project\":\"<name>\",\"tasks\":[{\"name\":\"...\",\"phase\":\"...\",\"priority\":3,\"plan\":\"...\",\"notes\":\"...\"}]}\n\n"
         f"User request: {text}\n"
@@ -315,11 +320,12 @@ def build_planner_prompt(text: str) -> str:
 
 def build_think_prompt(text: str) -> str:
     return (
-        "You are optimizing a build request before planning.\n"
-        "Rewrite the user request into a clearer, execution-ready planning brief for the planner.\n"
+        "You are optimizing a request before planning.\n"
+        "Rewrite the user request into a clearer, execution-ready planning brief for Ashley's planner.\n"
         "Requirements for the optimized brief:\n"
-        "- Keep original intent and scope; do not add extra features.\n"
-        "- Include concrete constraints, edge cases, and verification expectations when implied.\n"
+        "- Keep original intent and scope; do not add extra work.\n"
+        "- Include concrete constraints, deadlines, and quality expectations when implied.\n"
+        "- Clarify who needs to be contacted, what information is needed, and what the deliverable should look like.\n"
         "- Keep it concise and actionable for converting directly into tasks/phases.\n"
         "- Output plain text only (no markdown, no JSON, no commentary).\n\n"
         f"User request: {text}\n"
@@ -511,14 +517,14 @@ def ask_agent_async_worker(agent: str, question: str) -> None:
 
 def build_async_adhoc_prompt(instruction: str) -> str:
     return (
-        "You are executing a one-off adhoc coding instruction from the owner.\n"
-        "Agent role: coder\n"
+        "You are executing a one-off adhoc instruction from the owner.\n"
+        "Agent role: doer\n"
         f"Owner instruction: {instruction}\n\n"
         "Rules:\n"
-        "1) Execute the request directly in the target repository.\n"
+        "1) Execute the request directly — research, draft, organize, or whatever is needed.\n"
         "2) Do NOT create or modify task-table entries as part of this request.\n"
-        "3) Keep changes focused and minimal for the stated edge case.\n"
-        "4) End with a concise summary of files changed and verification performed.\n"
+        "3) Keep work focused and minimal for the stated request.\n"
+        "4) End with a concise summary of what was produced and where deliverables are saved.\n"
         "5) Return only final answer content; no channel routing metadata."
     )
 
@@ -537,10 +543,10 @@ def adhoc_coder_worker(instruction: str) -> None:
         if not answer_text:
             answer_text = "".join([result.stdout or "", "\n", result.stderr or ""]).strip()
     except subprocess.TimeoutExpired:
-        answer_text = f"Adhoc coder run timed out after {ADHOC_TIMEOUT_SEC}s."
+        answer_text = f"Adhoc doer run timed out after {ADHOC_TIMEOUT_SEC}s."
 
     if not answer_text:
-        answer_text = "Coder completed adhoc request without output."
+        answer_text = "Doer completed adhoc request without output."
     if len(answer_text) > 3500:
         answer_text = answer_text[:3500] + "\n...<truncated>"
     send_owner_message("coder", instruction, answer_text)
@@ -560,7 +566,7 @@ def queue_adhoc_coder(instruction: str) -> str:
     preview = request_text.replace("\n", " ")
     if len(preview) > 120:
         preview = preview[:117] + "..."
-    return f"Queued adhoc coder request: {preview}. You will receive the result via owner-message."
+    return f"Queued adhoc doer request: {preview}. You will receive the result via owner-message."
 
 
 def queue_ask_agent(question: str) -> tuple[str, str]:
@@ -651,6 +657,478 @@ def should_handle_status(text: str) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
+# ---------------------------------------------------------------------------
+# Scheduled Jobs (systemd timers)
+# ---------------------------------------------------------------------------
+
+def cron_to_oncalendar(cron_expr: str) -> str | None:
+    """Convert a 5-field cron expression to a systemd OnCalendar spec.
+
+    Supports: minute hour day-of-month month day-of-week
+    Uses systemd calendar syntax: DayOfWeek Year-Month-Day Hour:Minute:Second
+    """
+    parts = cron_expr.strip().split()
+    if len(parts) != 5:
+        return None
+
+    minute, hour, dom, month, dow = parts
+
+    # Validate basic structure (digits, *, /, -, ,)
+    cron_field_re = re.compile(r'^[\d\*,/\-]+$')
+    for field in parts:
+        if not cron_field_re.match(field):
+            return None
+
+    # Map cron fields to systemd OnCalendar
+    def convert_field(field: str, wildcard: str = "*") -> str:
+        if field == "*":
+            return wildcard
+        # Handle /step: */5 -> *:00/5 for minutes, or 00/5, etc.
+        if "/" in field:
+            base, step = field.split("/", 1)
+            if base == "*":
+                base = "0"
+            return f"{base}/{step}"
+        return field
+
+    # Build OnCalendar string
+    cal_dow = "*" if dow == "*" else dow
+    cal_month = convert_field(month)
+    cal_dom = convert_field(dom)
+    cal_hour = convert_field(hour)
+    cal_minute = convert_field(minute)
+
+    # systemd format: DayOfWeek Year-Month-Day Hour:Minute:Second
+    date_part = f"*-{cal_month}-{cal_dom}"
+    time_part = f"{cal_hour}:{cal_minute}:00"
+
+    if cal_dow != "*":
+        return f"{cal_dow} {date_part} {time_part}"
+    return f"{date_part} {time_part}"
+
+
+def make_job_id(description: str) -> str:
+    """Generate a short unique job ID from the description."""
+    slug = re.sub(r'[^a-z0-9]+', '-', description.lower().strip())[:40].strip('-')
+    short_hash = hashlib.md5(f"{slug}-{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:6]
+    return f"{slug}-{short_hash}"
+
+
+def schedule_job(cron_expr: str, task_description: str) -> str:
+    """Create a systemd timer+service pair for a scheduled task."""
+    on_calendar = cron_to_oncalendar(cron_expr)
+    if not on_calendar:
+        return (
+            "Invalid cron expression. Use 5 fields: minute hour day-of-month month day-of-week\n"
+            "Examples:\n"
+            "  0 7 * * *     = daily at 7am\n"
+            "  */30 * * * *  = every 30 minutes\n"
+            "  0 9 * * 1     = every Monday at 9am\n"
+            "  0 8,17 * * *  = 8am and 5pm daily"
+        )
+
+    job_id = make_job_id(task_description)
+    unit_name = f"{SCHEDULED_JOBS_PREFIX}{job_id}"
+    service_path = SCHEDULED_JOBS_DIR / f"{unit_name}.service"
+    timer_path = SCHEDULED_JOBS_DIR / f"{unit_name}.timer"
+    meta_path = SCHEDULED_JOBS_DIR / f"{unit_name}.meta.json"
+    payload_path = SCHEDULED_JOBS_DIR / f"{unit_name}.payload.json"
+
+    # Write the JSON payload to a file so curl reads it cleanly (no quoting issues)
+    payload = json.dumps({"text": f"/think {task_description}"})
+    SCHEDULED_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text(payload)
+
+    service_content = (
+        f"[Unit]\n"
+        f"Description=Ashley Scheduled: {task_description[:80]}\n"
+        f"\n"
+        f"[Service]\n"
+        f"Type=oneshot\n"
+        f"ExecStart=/usr/bin/curl -sS -X POST http://127.0.0.1:{CHAT_ROUTER_PORT}/route "
+        f'-H "Content-Type: application/json" '
+        f"-d @{payload_path}\n"
+        f"Environment=HOME={Path.home()}\n"
+    )
+
+    timer_content = (
+        f"[Unit]\n"
+        f"Description=Ashley Schedule: {task_description[:80]}\n"
+        f"\n"
+        f"[Timer]\n"
+        f"OnCalendar={on_calendar}\n"
+        f"Persistent=true\n"
+        f"\n"
+        f"[Install]\n"
+        f"WantedBy=timers.target\n"
+    )
+
+    meta = {
+        "job_id": job_id,
+        "cron": cron_expr,
+        "on_calendar": on_calendar,
+        "description": task_description,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "unit_name": unit_name,
+    }
+
+    SCHEDULED_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    service_path.write_text(service_content)
+    timer_path.write_text(timer_content)
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    result = subprocess.run(
+        ["systemctl", "--user", "enable", "--now", f"{unit_name}.timer"],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode != 0:
+        return f"Failed to enable timer: {result.stderr.strip()}"
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f"Scheduled job created.\n"
+        f"ID: {job_id}\n"
+        f"Cron: {cron_expr}\n"
+        f"SystemD: {on_calendar}\n"
+        f"Task: {task_description}\n"
+        f"Created: {stamp}"
+    )
+
+
+def list_jobs() -> str:
+    """List all Ashley scheduled jobs."""
+    SCHEDULED_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    meta_files = sorted(SCHEDULED_JOBS_DIR.glob(f"{SCHEDULED_JOBS_PREFIX}*.meta.json"))
+
+    if not meta_files:
+        return "No scheduled jobs found."
+
+    lines = ["Scheduled jobs:\n"]
+    for meta_path in meta_files:
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        job_id = meta.get("job_id", "?")
+        cron = meta.get("cron", "?")
+        desc = meta.get("description", "?")
+        created = meta.get("created_at", "?")[:16]
+        unit_name = meta.get("unit_name", "")
+
+        # Check if timer is active
+        status_result = subprocess.run(
+            ["systemctl", "--user", "is-active", f"{unit_name}.timer"],
+            capture_output=True, text=True,
+        )
+        status = status_result.stdout.strip() if status_result.returncode == 0 else "inactive"
+
+        # Get next trigger time
+        next_result = subprocess.run(
+            ["systemctl", "--user", "show", f"{unit_name}.timer", "--property=NextElapseUSecRealtime", "--value"],
+            capture_output=True, text=True,
+        )
+        next_run = next_result.stdout.strip()[:19] if next_result.stdout.strip() else "—"
+
+        lines.append(f"ID: {job_id}")
+        lines.append(f"  Cron: {cron}  |  Status: {status}")
+        lines.append(f"  Next: {next_run}")
+        lines.append(f"  Task: {desc[:100]}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def delete_job(job_id: str) -> str:
+    """Delete a scheduled job by ID or 'all'."""
+    SCHEDULED_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if job_id.lower() == "all":
+        meta_files = list(SCHEDULED_JOBS_DIR.glob(f"{SCHEDULED_JOBS_PREFIX}*.meta.json"))
+        if not meta_files:
+            return "No scheduled jobs to delete."
+        count = 0
+        for meta_path in meta_files:
+            try:
+                meta = json.loads(meta_path.read_text())
+                unit_name = meta.get("unit_name", "")
+                if unit_name:
+                    subprocess.run(
+                        ["systemctl", "--user", "disable", "--now", f"{unit_name}.timer"],
+                        capture_output=True,
+                    )
+                    (SCHEDULED_JOBS_DIR / f"{unit_name}.service").unlink(missing_ok=True)
+                    (SCHEDULED_JOBS_DIR / f"{unit_name}.timer").unlink(missing_ok=True)
+                    (SCHEDULED_JOBS_DIR / f"{unit_name}.payload.json").unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+                count += 1
+            except (json.JSONDecodeError, OSError):
+                meta_path.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        return f"Deleted {count} scheduled job(s)."
+
+    # Find by job_id (partial match)
+    meta_files = list(SCHEDULED_JOBS_DIR.glob(f"{SCHEDULED_JOBS_PREFIX}*.meta.json"))
+    matched = None
+    for meta_path in meta_files:
+        try:
+            meta = json.loads(meta_path.read_text())
+            if meta.get("job_id", "") == job_id or job_id in meta.get("job_id", ""):
+                matched = (meta_path, meta)
+                break
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    if not matched:
+        return f"Job '{job_id}' not found. Use /jobs to see all scheduled jobs."
+
+    meta_path, meta = matched
+    unit_name = meta.get("unit_name", "")
+    desc = meta.get("description", "?")
+
+    if unit_name:
+        subprocess.run(
+            ["systemctl", "--user", "disable", "--now", f"{unit_name}.timer"],
+            capture_output=True,
+        )
+        (SCHEDULED_JOBS_DIR / f"{unit_name}.service").unlink(missing_ok=True)
+        (SCHEDULED_JOBS_DIR / f"{unit_name}.timer").unlink(missing_ok=True)
+        (SCHEDULED_JOBS_DIR / f"{unit_name}.payload.json").unlink(missing_ok=True)
+    meta_path.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+
+    return f"Deleted job: {meta.get('job_id', job_id)}\nTask was: {desc[:100]}"
+
+
+# ---------------------------------------------------------------------------
+# Agent Clarifying Questions
+# ---------------------------------------------------------------------------
+
+QUESTION_EXPIRY_MINUTES = 60
+
+
+def _sql_escape(text: str) -> str:
+    """Escape single quotes for SQL."""
+    return text.replace("'", "''")
+
+
+def create_pending_question(agent: str, task_id: int | None, question: str) -> int | None:
+    """Insert a pending question and return its ID."""
+    task_ref = str(task_id) if task_id else "NULL"
+    q_escaped = _sql_escape(question)
+    a_escaped = _sql_escape(agent)
+    result = run_psql(
+        f"INSERT INTO pending_questions (agent, task_id, question) "
+        f"VALUES ('{a_escaped}', {task_ref}, '{q_escaped}') RETURNING id;"
+    )
+    try:
+        # run_psql may return "5\nINSERT 0 1" — take first line only
+        return int(result.strip().splitlines()[0])
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
+def get_oldest_pending_question() -> dict | None:
+    """Get the oldest pending (unanswered) question."""
+    row = run_psql(
+        "SELECT id, agent, task_id, question, created_at "
+        "FROM pending_questions WHERE status = 'pending' "
+        "ORDER BY created_at ASC LIMIT 1;"
+    )
+    if not row:
+        return None
+    parts = row.split("|", 4)
+    if len(parts) < 5:
+        return None
+    return {
+        "id": int(parts[0]),
+        "agent": parts[1],
+        "task_id": int(parts[2]) if parts[2] else None,
+        "question": parts[3],
+        "created_at": parts[4],
+    }
+
+
+def answer_pending_question(question_id: int, answer: str) -> bool:
+    """Mark a question as answered and store the answer."""
+    a_escaped = _sql_escape(answer)
+    run_psql(
+        f"UPDATE pending_questions SET answer = '{a_escaped}', "
+        f"status = 'answered', answered_at = CURRENT_TIMESTAMP "
+        f"WHERE id = {question_id} AND status = 'pending';"
+    )
+    return True
+
+
+def expire_old_questions() -> int:
+    """Expire questions older than QUESTION_EXPIRY_MINUTES."""
+    result = run_psql(
+        f"UPDATE pending_questions SET status = 'expired' "
+        f"WHERE status = 'pending' "
+        f"AND created_at < NOW() - INTERVAL '{QUESTION_EXPIRY_MINUTES} minutes';"
+    )
+    # psql returns "UPDATE N"
+    return 0
+
+
+def list_pending_questions() -> str:
+    """List all pending questions."""
+    expire_old_questions()
+    rows = run_psql(
+        "SELECT id, agent, task_id, question, created_at "
+        "FROM pending_questions WHERE status = 'pending' "
+        "ORDER BY created_at ASC LIMIT 10;"
+    )
+    if not rows:
+        return "No pending questions."
+    lines = ["Pending questions:\n"]
+    for row in rows.strip().splitlines():
+        parts = row.split("|", 4)
+        if len(parts) < 5:
+            continue
+        qid, agent, task_id, question, created = parts
+        task_ref = f" (task #{task_id})" if task_id else ""
+        age = created.strip()[:16]
+        lines.append(f"#{qid} [{agent}{task_ref}] {age}")
+        lines.append(f"  {question[:150]}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def list_pending_questions_structured() -> list[dict]:
+    """Return pending questions as a list of dicts for the API."""
+    expire_old_questions()
+    rows = run_psql(
+        "SELECT id, agent, task_id, question, created_at "
+        "FROM pending_questions WHERE status = 'pending' "
+        "ORDER BY created_at ASC LIMIT 10;"
+    )
+    if not rows:
+        return []
+    result = []
+    for row in rows.strip().splitlines():
+        parts = row.split("|", 4)
+        if len(parts) < 5:
+            continue
+        qid, agent, task_id, question, created = parts
+        result.append({
+            "id": int(qid.strip()),
+            "agent": agent.strip(),
+            "task_id": int(task_id.strip()) if task_id.strip() else None,
+            "question": question.strip(),
+            "created_at": created.strip(),
+        })
+    return result
+
+
+def count_pending_questions() -> int:
+    """Return count of pending questions."""
+    result = run_psql(
+        "SELECT COUNT(*) FROM pending_questions WHERE status = 'pending';"
+    )
+    try:
+        return int(result.strip())
+    except (ValueError, TypeError):
+        return 0
+
+
+def ask_owner_question(agent: str, task_id: int | None, question: str) -> tuple[bool, str]:
+    """Agent asks the owner a clarifying question. Stores in DB and sends to Telegram."""
+    agent = agent.strip().lower()
+    if agent not in ALLOWED_ASK_AGENTS:
+        return False, f"Unknown agent '{agent}'. Allowed: {', '.join(sorted(ALLOWED_ASK_AGENTS))}"
+
+    if not question.strip():
+        return False, "Question text is required."
+
+    expire_old_questions()
+    qid = create_pending_question(agent, task_id, question.strip())
+    if not qid:
+        return False, "Failed to store question in database."
+
+    # Send to owner via Telegram
+    task_ref = f" (task #{task_id})" if task_id else ""
+    message = (
+        f"❓ *Agent Question*\n\n"
+        f"From: `{agent}`{task_ref}\n"
+        f"Question ID: `{qid}`\n\n"
+        f"{question.strip()}\n\n"
+        f"_Reply with /answer <your response> or just type your answer._"
+    )
+
+    if os.path.isfile(TELEGRAM_NOTIFY_SCRIPT) and os.access(TELEGRAM_NOTIFY_SCRIPT, os.X_OK):
+        cmd = [
+            TELEGRAM_NOTIFY_SCRIPT,
+            "agent-question",
+            str(qid),
+            f"Agent {agent}",
+            message,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+
+    print(f"[{datetime.now(timezone.utc).isoformat()}] question_created id={qid} agent={agent} task_id={task_id}")
+    return True, f"Question #{qid} sent to owner. Waiting for reply."
+
+
+def handle_owner_reply(answer_text: str) -> str:
+    """Process an owner's reply to the oldest pending question."""
+    expire_old_questions()
+    question = get_oldest_pending_question()
+    if not question:
+        return "No pending questions to answer."
+
+    qid = question["id"]
+    agent = question["agent"]
+    task_id = question["task_id"]
+    original_q = question["question"]
+
+    answer_pending_question(qid, answer_text)
+
+    # If linked to a task, append the answer to the task's solution field
+    if task_id:
+        solution_escaped = _sql_escape(
+            f"\n\n--- Owner Answer (Q#{qid}) ---\n"
+            f"Q: {original_q}\nA: {answer_text}"
+        )
+        run_psql(
+            f"UPDATE autonomous_tasks SET solution = COALESCE(solution, '') || '{solution_escaped}' "
+            f"WHERE id = {task_id};"
+        )
+
+    # Dispatch a follow-up prompt to the agent so it can continue
+    follow_up = (
+        f"The owner answered your question.\n"
+        f"Question: {original_q}\n"
+        f"Answer: {answer_text}\n\n"
+        f"Continue your current task with this information."
+    )
+
+    def _dispatch():
+        try:
+            if agent == "planner":
+                spawn_planner(follow_up)
+            else:
+                queue_adhoc_coder(follow_up)
+        except Exception as e:
+            print(f"[{datetime.now(timezone.utc).isoformat()}] follow-up dispatch failed: {e}")
+
+    threading.Thread(target=_dispatch, daemon=True).start()
+
+    print(f"[{datetime.now(timezone.utc).isoformat()}] question_answered id={qid} agent={agent}")
+    return (
+        f"Answer recorded for question #{qid}.\n"
+        f"Agent: {agent}\n"
+        f"Q: {original_q[:100]}\n"
+        f"A: {answer_text[:100]}\n"
+        f"Follow-up dispatched to {agent}."
+    )
+
+
 def route_text(text: str) -> str:
     if not text.strip():
         return ""
@@ -716,6 +1194,52 @@ def route_text(text: str) -> str:
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=agent kind=ask agent={ask_agent_name or ASK_DEFAULT_AGENT}")
         return ""
 
+    # ---------- Scheduled jobs ----------
+    if lowered.startswith("/schedule"):
+        sched_text = stripped[9:].strip()
+        if not sched_text:
+            return (
+                "Usage: /schedule <cron> <task description>\n"
+                "Examples:\n"
+                "  /schedule 0 7 * * * Send me a morning briefing\n"
+                "  /schedule */30 * * * * Check server health\n"
+                "  /schedule 0 9 * * 1 Weekly project status report"
+            )
+        # Parse: first 5 tokens are cron fields, rest is description
+        parts = sched_text.split()
+        if len(parts) < 6:
+            return (
+                "Need 5 cron fields + a task description.\n"
+                "Format: /schedule <min> <hour> <dom> <month> <dow> <task>"
+            )
+        cron_expr = " ".join(parts[:5])
+        task_desc = " ".join(parts[5:])
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=schedule cron={cron_expr}")
+        return schedule_job(cron_expr, task_desc)
+
+    if lowered.startswith("/jobs"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=jobs")
+        return list_jobs()
+
+    if lowered.startswith("/deletejob"):
+        del_id = stripped[10:].strip()
+        if not del_id:
+            return "Usage: /deletejob <job_id>  or  /deletejob all"
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=deletejob id={del_id}")
+        return delete_job(del_id)
+
+    # ---------- Agent questions ----------
+    if lowered.startswith("/pending"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=pending")
+        return list_pending_questions()
+
+    if lowered.startswith("/answer"):
+        answer_text = stripped[7:].strip()
+        if not answer_text:
+            return "Usage: /answer <your response to the agent's question>"
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=answer")
+        return handle_owner_reply(answer_text)
+
     if "weather" in lowered:
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weather")
         return "Weather lookup is not configured on this host."
@@ -731,8 +1255,23 @@ def route_text(text: str) -> str:
 
 
 class RouterHandler(BaseHTTPRequestHandler):
+    def _json_response(self, code: int, body: dict) -> None:
+        raw = json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:
+        if self.path == "/pending":
+            questions = list_pending_questions_structured()
+            self._json_response(200, {"ok": True, "count": len(questions), "questions": questions})
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self) -> None:
-        if self.path not in {"/route", "/owner-message"}:
+        if self.path not in {"/route", "/owner-message", "/ask-owner", "/reply"}:
             self.send_response(404)
             self.end_headers()
             return
@@ -745,26 +1284,39 @@ class RouterHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if self.path == "/ask-owner":
+            agent = str(payload.get("agent", "")).strip()
+            task_id = payload.get("task_id")
+            question = str(payload.get("question", "")).strip()
+            if not agent or not question:
+                self._json_response(400, {"ok": False, "error": "agent and question required"})
+                return
+            tid = int(task_id) if task_id is not None else None
+            result = ask_owner_question(agent, tid, question)
+            self._json_response(200, {"ok": True, "result": result})
+            return
+
+        if self.path == "/reply":
+            answer = str(payload.get("answer", "")).strip()
+            if not answer:
+                self._json_response(400, {"ok": False, "error": "answer required"})
+                return
+            result = handle_owner_reply(answer)
+            self._json_response(200, {"ok": True, "result": result})
+            return
+
         if self.path == "/owner-message":
             ok, reply = send_owner_message(
                 str(payload.get("agent", "")),
                 str(payload.get("question", "")),
                 str(payload.get("response", "")),
             )
-            response = json.dumps({"ok": ok, "reply": reply})
-            self.send_response(200 if ok else 400)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(response.encode("utf-8"))
+            self._json_response(200 if ok else 400, {"ok": ok, "reply": reply})
             return
 
         text = payload.get("text", "")
         reply = route_text(text)
-        response = json.dumps({"reply": reply})
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(response.encode("utf-8"))
+        self._json_response(200, {"reply": reply})
 
     def log_message(self, format: str, *args) -> None:
         return

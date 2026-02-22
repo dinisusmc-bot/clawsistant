@@ -72,7 +72,8 @@ TELEGRAM_ALLOW_FROM = [
     if value.strip()
 ]
 TELEGRAM_ACK_REACTION = os.environ.get("TELEGRAM_ACK_REACTION", "✅")
-CHAT_ROUTER_URL = os.environ.get("CHAT_ROUTER_URL", "http://127.0.0.1:18801/route")
+CHAT_ROUTER_BASE = os.environ.get("CHAT_ROUTER_BASE", "http://127.0.0.1:18801")
+CHAT_ROUTER_URL = os.environ.get("CHAT_ROUTER_URL", f"{CHAT_ROUTER_BASE}/route")
 
 
 def api_request(method: str, data: dict) -> tuple[bool, dict]:
@@ -104,6 +105,43 @@ def send_reaction(chat_id: str, message_id: int, emoji: str) -> bool:
         {"chat_id": chat_id, "message_id": message_id, "reaction": payload},
     )
     return ok and response.get("ok") is True
+
+
+def has_pending_questions() -> bool:
+    """Check if there are any pending agent questions."""
+    url = f"{CHAT_ROUTER_BASE}/pending"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("count", 0) > 0
+    except Exception:
+        return False
+
+
+def get_pending_questions() -> list:
+    """Get list of pending agent questions."""
+    url = f"{CHAT_ROUTER_BASE}/pending"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("questions", [])
+    except Exception:
+        return []
+
+
+def route_reply_to_agent(answer: str) -> str:
+    """Send an answer to the oldest pending agent question."""
+    url = f"{CHAT_ROUTER_BASE}/reply"
+    payload = json.dumps({"answer": answer}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("result", "Answer sent.")
+    except Exception as exc:
+        return f"Failed to send answer: {exc}"
 
 
 def route_via_chat_router(text: str) -> str:
@@ -252,7 +290,17 @@ def handle_command(text: str) -> str:
             "/ask <question> - async planner answer via owner-message\n"
             "/adhoc <instruction> - one-off async coder run (no task DB entry)\n"
             "/lesson <lesson learned> - save global lesson for future tasks\n"
-            "/project <project>|<note> - save project-specific context"
+            "/project <project>|<note> - save project-specific context\n"
+            "\n"
+            "Scheduling commands:\n"
+            "/schedule <min> <hr> <dom> <mon> <dow> <task> - create recurring job\n"
+            "/jobs - list all scheduled jobs\n"
+            "/deletejob <id> - delete a scheduled job (or 'all')\n"
+            "\n"
+            "Agent questions:\n"
+            "/pending - list pending agent questions\n"
+            "/answer <text> - answer the oldest pending question\n"
+            "(or just reply with plain text when questions are pending)"
         )
 
     if cmd == "/blockers":
@@ -359,6 +407,27 @@ def handle_command(text: str) -> str:
             return f"Requeued {count} blocked tasks to {target_status}."
         return "No blocked tasks to requeue."
 
+    if cmd == "/pending":
+        questions = get_pending_questions()
+        if not questions:
+            return "No pending agent questions."
+        lines = [f"Pending questions ({len(questions)}):"]
+        for q in questions:
+            agent = q.get("agent", "unknown")
+            question = q.get("question", "")
+            task_id = q.get("task_id", "")
+            qid = q.get("id", "")
+            task_str = f" (task #{task_id})" if task_id else ""
+            lines.append(f"❓ #{qid} [{agent}]{task_str}: {question}")
+        lines.append("\nReply with /answer <text> or just send plain text.")
+        return "\n".join(lines)
+
+    if cmd == "/answer":
+        answer = " ".join(parts[1:]).strip()
+        if not answer:
+            return "Usage: /answer <your answer text>"
+        return route_reply_to_agent(answer)
+
     if cmd == "/digest" and len(parts) >= 2 and parts[1].lower() == "now":
         rows = run_psql(
             "SELECT id, name, COALESCE(blocked_reason,'') FROM autonomous_tasks "
@@ -399,6 +468,8 @@ def is_local_command(text: str) -> bool:
         "/unblock",
         "/retry",
         "/digest",
+        "/pending",
+        "/answer",
     }
     return cmd in local_commands
 
@@ -449,6 +520,9 @@ def main() -> int:
             if is_local_command(stripped):
                 print(f"[{datetime.utcnow().isoformat()}] telegram command from {sender_id or chat_id}")
                 reply = handle_command(text)
+            elif not stripped.startswith("/") and has_pending_questions():
+                print(f"[{datetime.utcnow().isoformat()}] telegram auto-answer from {sender_id or chat_id}")
+                reply = route_reply_to_agent(stripped)
             else:
                 print(f"[{datetime.utcnow().isoformat()}] telegram routed from {sender_id or chat_id}")
                 reply = route_via_chat_router(text)
