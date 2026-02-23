@@ -107,6 +107,36 @@ def send_reaction(chat_id: str, message_id: int, emoji: str) -> bool:
     return ok and response.get("ok") is True
 
 
+INBOX_DIR = Path.home() / ".openclaw" / "workspace" / "inbox"
+
+
+def download_telegram_file(file_id: str, filename: str) -> str | None:
+    """Download a file from Telegram and save to inbox directory."""
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    # Get file path from Telegram
+    ok, resp = api_request("getFile", {"file_id": file_id})
+    if not ok or not resp.get("ok"):
+        return None
+    file_path = resp.get("result", {}).get("file_path", "")
+    if not file_path:
+        return None
+    # Download
+    url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = response.read()
+        # Save with timestamp prefix to avoid collisions
+        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        safe_name = filename.replace("/", "_").replace("\\", "_")
+        dest = INBOX_DIR / f"{ts}_{safe_name}"
+        dest.write_bytes(data)
+        return str(dest)
+    except Exception as exc:
+        print(f"[{datetime.utcnow().isoformat()}] telegram download error={type(exc).__name__}")
+        return None
+
+
 def has_pending_questions() -> bool:
     """Check if there are any pending agent questions."""
     url = f"{CHAT_ROUTER_BASE}/pending"
@@ -300,7 +330,30 @@ def handle_command(text: str) -> str:
             "Agent questions:\n"
             "/pending - list pending agent questions\n"
             "/answer <text> - answer the oldest pending question\n"
-            "(or just reply with plain text when questions are pending)"
+            "(or just reply with plain text when questions are pending)\n"
+            "\n"
+            "Gmail & Calendar:\n"
+            "/emails [search] - list inbox (optional Gmail search query)\n"
+            "/email <id> - read a specific email\n"
+            "/sendemail to | subject | body - send an email\n"
+            "/unread - count of unread emails\n"
+            "/calendar [days] - show upcoming events (default 7 days)\n"
+            "/event <time> | <title> [| desc] [| location] - create event\n"
+            "/delevent <id> - delete a calendar event\n"
+            "\n"
+            "Info & Tools:\n"
+            "/weather [city] - current weather\n"
+            "/search <query> - web search\n"
+            "/briefing - morning briefing summary\n"
+            "/weeklyreview - weekly activity summary\n"
+            "\n"
+            "Notes & Links:\n"
+            "/note <text> - save a quick note\n"
+            "/notes [search <query>] - view today's notes or search\n"
+            "/save <url> [tags] - bookmark a link\n"
+            "/links [tag] - list saved bookmarks\n"
+            "\n"
+            "Send a file/photo and it'll be saved to inbox."
         )
 
     if cmd == "/blockers":
@@ -532,6 +585,63 @@ def main() -> int:
                     send_message("✅ received")
             if reply:
                 send_message(reply)
+
+        # Handle file uploads (documents, photos, audio, video)
+        elif message.get("document"):
+            doc = message["document"]
+            file_id = doc.get("file_id", "")
+            file_name = doc.get("file_name", "unknown_file")
+            file_size = doc.get("file_size", 0)
+            print(f"[{datetime.utcnow().isoformat()}] telegram document from {sender_id or chat_id}: {file_name}")
+            saved = download_telegram_file(file_id, file_name)
+            if saved:
+                caption = message.get("caption", "")
+                cap_note = f" — '{caption}'" if caption else ""
+                send_message(f"📁 Saved: {file_name} ({file_size} bytes){cap_note}\n📂 Location: inbox/")
+            else:
+                send_message(f"⚠️ Failed to download: {file_name}")
+
+        elif message.get("photo"):
+            photos = message["photo"]
+            # Take the largest resolution (last in the array)
+            best = photos[-1] if photos else None
+            if best:
+                file_id = best.get("file_id", "")
+                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                file_name = f"photo_{ts}.jpg"
+                print(f"[{datetime.utcnow().isoformat()}] telegram photo from {sender_id or chat_id}")
+                saved = download_telegram_file(file_id, file_name)
+                if saved:
+                    caption = message.get("caption", "")
+                    cap_note = f" — '{caption}'" if caption else ""
+                    send_message(f"📸 Photo saved: {file_name}{cap_note}\n📂 Location: inbox/")
+                else:
+                    send_message("⚠️ Failed to download photo")
+
+        elif message.get("voice") or message.get("audio"):
+            audio = message.get("voice") or message.get("audio", {})
+            file_id = audio.get("file_id", "")
+            mime = audio.get("mime_type", "audio/ogg")
+            ext = mime.split("/")[-1] if "/" in mime else "ogg"
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            file_name = f"audio_{ts}.{ext}"
+            print(f"[{datetime.utcnow().isoformat()}] telegram audio from {sender_id or chat_id}")
+            saved = download_telegram_file(file_id, file_name)
+            if saved:
+                send_message(f"🎵 Audio saved: {file_name}\n📂 Location: inbox/")
+            else:
+                send_message("⚠️ Failed to download audio")
+
+        elif message.get("video"):
+            vid = message["video"]
+            file_id = vid.get("file_id", "")
+            file_name = vid.get("file_name", f"video_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.mp4")
+            print(f"[{datetime.utcnow().isoformat()}] telegram video from {sender_id or chat_id}")
+            saved = download_telegram_file(file_id, file_name)
+            if saved:
+                send_message(f"🎬 Video saved: {file_name}\n📂 Location: inbox/")
+            else:
+                send_message(f"⚠️ Failed to download: {file_name}")
 
         if update_id is not None:
             offset = update_id + 1

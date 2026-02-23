@@ -41,6 +41,15 @@ AGENT_TEMP_DEFAULTS = {
 SCHEDULED_JOBS_DIR = Path.home() / ".config" / "systemd" / "user"
 SCHEDULED_JOBS_PREFIX = "ashley-job-"
 
+# ---- New feature directories ----
+NOTES_DIR = Path.home() / ".openclaw" / "workspace" / "notes"
+LINKS_FILE = Path.home() / ".openclaw" / "workspace" / "agent-context" / "bookmarks.json"
+CONVERSATION_FILE = Path.home() / ".openclaw" / "workspace" / ".conversation-buffer.json"
+CONVERSATION_MAX = 20  # max messages to keep in short-term memory
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
+WEATHER_LOCATION = os.environ.get("WEATHER_LOCATION", "New York,US")
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "")  # e.g. http://localhost:8888
+
 
 def run_psql(query: str) -> str:
     env = os.environ.copy()
@@ -623,6 +632,8 @@ def send_owner_message(agent: str, question: str, response: str) -> tuple[bool, 
 
     if result.returncode != 0:
         return False, "Failed to send owner message"
+    # Record bot response in conversation memory
+    record_conversation("ashley", response_text[:300])
     return True, "Owner message sent"
 
 
@@ -1129,6 +1140,680 @@ def handle_owner_reply(answer_text: str) -> str:
     )
 
 
+# ===================== Gmail / Calendar Handlers =====================
+
+def _load_google_services():
+    """Lazy-import google-services module."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "google_services",
+        str(Path.home() / ".openclaw" / "workspace" / "google-services.py"),
+    )
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    return None
+
+
+def _handle_emails(text: str) -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    parts = text.strip().split(maxsplit=1)
+    query = parts[1] if len(parts) > 1 else ""
+    emails = gs.list_emails(query=query, max_results=10)
+    if not emails:
+        return "No emails found." if query else "Inbox is empty (or not authenticated)."
+    return gs._format_email_list(emails)
+
+
+def _handle_read_email(text: str) -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return "Usage: /email <message_id>"
+    msg = gs.read_email(parts[1])
+    if "error" in msg:
+        return f"Error: {msg['error']}"
+    lines = [
+        f"From: {msg['from']}",
+        f"To: {msg['to']}",
+        f"Subject: {msg['subject']}",
+        f"Date: {msg['date']}",
+        "",
+        msg.get("body", "(no body)"),
+    ]
+    return "\n".join(lines)
+
+
+def _handle_send_email(text: str) -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    # Format: /sendemail to@email.com | subject | body
+    content = text.strip()
+    if content.lower().startswith("/sendemail"):
+        content = content[10:].strip()
+    if not content:
+        return "Usage: /sendemail to@email.com | subject | body text"
+    parts = content.split("|", 2)
+    if len(parts) < 3:
+        return "Usage: /sendemail to@email.com | subject | body text\nSeparate fields with |"
+    to = parts[0].strip()
+    subject = parts[1].strip()
+    body = parts[2].strip()
+    if not to or not subject:
+        return "Both recipient and subject are required."
+    result = gs.send_email(to, subject, body)
+    if "error" in result:
+        return f"Send failed: {result['error']}"
+    return f"✅ Email sent to {to}\nSubject: {subject}"
+
+
+def _handle_calendar(text: str) -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    parts = text.strip().split()
+    days = 7
+    if len(parts) >= 2 and parts[1].isdigit():
+        days = int(parts[1])
+    events = gs.list_events(days=days)
+    if not events:
+        return f"No events in the next {days} day(s)."
+    return gs._format_event_list(events)
+
+
+def _handle_create_event(text: str) -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    # Format: /event 2026-02-23T14:00 | Meeting title | optional description | optional location
+    content = text.strip()
+    if content.lower().startswith("/event"):
+        content = content[6:].strip()
+    if not content:
+        return (
+            "Usage: /event <start_time> | <title> [| description] [| location]\n"
+            "Example: /event 2026-02-23T14:00 | Team meeting | Discuss roadmap | Zoom\n"
+            "All-day: /event 2026-02-23 | Day off"
+        )
+    parts = content.split("|")
+    if len(parts) < 2:
+        return "At minimum: /event <start_time> | <title>"
+    start_time = parts[0].strip()
+    summary = parts[1].strip()
+    description = parts[2].strip() if len(parts) > 2 else ""
+    location = parts[3].strip() if len(parts) > 3 else ""
+    all_day = "T" not in start_time and len(start_time) == 10
+
+    result = gs.create_event(
+        summary=summary,
+        start_time=start_time,
+        description=description,
+        location=location,
+        all_day=all_day,
+    )
+    if "error" in result:
+        return f"Failed to create event: {result['error']}"
+    return f"✅ Event created: {result.get('summary', summary)}\nStart: {start_time}"
+
+
+def _handle_delete_event(text: str) -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return "Usage: /delevent <event_id>"
+    result = gs.delete_event(parts[1])
+    if "error" in result:
+        return f"Failed: {result['error']}"
+    return f"✅ Event deleted."
+
+
+def _handle_unread() -> str:
+    gs = _load_google_services()
+    if not gs:
+        return "Google services module not found."
+    count = gs.count_unread()
+    if count < 0:
+        return "Not authenticated with Gmail."
+    if count == 0:
+        return "📧 No unread emails."
+    return f"📧 {count} unread email(s)."
+
+
+# ===================== Weather =====================
+
+def _handle_weather(text: str) -> str:
+    """Get current weather using OpenWeatherMap API."""
+    if not OPENWEATHER_API_KEY:
+        return "Weather not configured. Set OPENWEATHER_API_KEY environment variable."
+    parts = text.strip().split(maxsplit=1)
+    location = parts[1] if len(parts) > 1 else WEATHER_LOCATION
+    try:
+        import urllib.request
+        import urllib.parse
+        url = (
+            f"https://api.openweathermap.org/data/2.5/weather?"
+            f"q={urllib.parse.quote(location)}&appid={OPENWEATHER_API_KEY}&units=imperial"
+        )
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        temp = data["main"]["temp"]
+        feels = data["main"]["feels_like"]
+        humidity = data["main"]["humidity"]
+        desc = data["weather"][0]["description"].capitalize()
+        wind = data["wind"]["speed"]
+        city = data["name"]
+        return (
+            f"🌤 Weather for {city}:\n"
+            f"  {desc}\n"
+            f"  🌡 {temp:.0f}°F (feels like {feels:.0f}°F)\n"
+            f"  💧 Humidity: {humidity}%\n"
+            f"  💨 Wind: {wind:.0f} mph"
+        )
+    except Exception as e:
+        return f"Weather lookup failed: {e}"
+
+
+# ===================== Web Search =====================
+
+def _handle_search(text: str) -> str:
+    """Search the web using SearXNG or fallback."""
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return "Usage: /search <query>"
+    query = parts[1]
+
+    # Try SearXNG first
+    if SEARXNG_URL:
+        return _searxng_search(query)
+
+    # Fallback: use DuckDuckGo instant answers (no API key needed)
+    return _ddg_search(query)
+
+
+def _searxng_search(query: str) -> str:
+    """Search via self-hosted SearXNG instance."""
+    import urllib.request
+    import urllib.parse
+    try:
+        url = f"{SEARXNG_URL}/search?q={urllib.parse.quote(query)}&format=json&engines=google,duckduckgo,brave&categories=general"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        results = data.get("results", [])[:5]
+        if not results:
+            return f"No results found for: {query}"
+        lines = [f"🔍 Search: {query}\n"]
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "")
+            url = r.get("url", "")
+            content = r.get("content", "")[:150]
+            lines.append(f"{i}. {title}")
+            if content:
+                lines.append(f"   {content}")
+            lines.append(f"   {url}")
+            lines.append("")
+        return "\n".join(lines).strip()
+    except Exception as e:
+        return f"Search failed: {e}"
+
+
+def _ddg_search(query: str) -> str:
+    """Search via DuckDuckGo instant answers API (no key needed)."""
+    import urllib.request
+    import urllib.parse
+    try:
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
+        req = urllib.request.Request(url, method="GET", headers={"User-Agent": "AshleyBot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        lines = [f"🔍 Search: {query}\n"]
+
+        # Abstract/answer
+        abstract = data.get("AbstractText", "")
+        answer = data.get("Answer", "")
+        if answer:
+            lines.append(f"Answer: {answer}")
+        if abstract:
+            lines.append(abstract[:500])
+            src = data.get("AbstractSource", "")
+            src_url = data.get("AbstractURL", "")
+            if src:
+                lines.append(f"Source: {src} — {src_url}")
+
+        # Related topics
+        topics = data.get("RelatedTopics", [])[:5]
+        if topics:
+            lines.append("\nRelated:")
+            for t in topics:
+                text_val = t.get("Text", "")
+                url_val = t.get("FirstURL", "")
+                if text_val:
+                    lines.append(f"• {text_val[:150]}")
+                    if url_val:
+                        lines.append(f"  {url_val}")
+
+        if len(lines) <= 1:
+            return f"No instant answer found for: {query}\nTip: Try asking Ashley to research this topic with /plan"
+
+        return "\n".join(lines).strip()
+    except Exception as e:
+        return f"Search failed: {e}"
+
+
+# ===================== Notes =====================
+
+def _handle_note(text: str) -> str:
+    """Save a quick note to today's file."""
+    content = text.strip()
+    if content.lower().startswith("/note"):
+        content = content[5:].strip()
+    if not content:
+        return "Usage: /note <your note text>"
+
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    note_file = NOTES_DIR / f"{today}.md"
+
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M")
+    entry = f"- [{timestamp}] {content}\n"
+
+    if note_file.exists():
+        note_file.write_text(note_file.read_text() + entry)
+    else:
+        note_file.write_text(f"# Notes — {today}\n\n{entry}")
+
+    return f"📝 Note saved."
+
+
+def _handle_notes(text: str) -> str:
+    """List notes. /notes = today, /notes search <query>, /notes <date>."""
+    parts = text.strip().split(maxsplit=2)
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+
+    if len(parts) >= 3 and parts[1].lower() == "search":
+        query = parts[2].lower()
+        results = []
+        for f in sorted(NOTES_DIR.glob("*.md"), reverse=True)[:30]:
+            content = f.read_text()
+            if query in content.lower():
+                # Find matching lines
+                for line in content.splitlines():
+                    if query in line.lower():
+                        results.append(f"[{f.stem}] {line.strip()}")
+        if not results:
+            return f"No notes matching '{query}'."
+        return f"🔍 Notes matching '{query}':\n" + "\n".join(results[:15])
+
+    if len(parts) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}", parts[1]):
+        date = parts[1]
+        note_file = NOTES_DIR / f"{date}.md"
+        if note_file.exists():
+            return note_file.read_text()[:3000]
+        return f"No notes for {date}."
+
+    # Default: today's notes
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    note_file = NOTES_DIR / f"{today}.md"
+    if note_file.exists():
+        return note_file.read_text()[:3000]
+    return "No notes yet today. Use /note <text> to add one."
+
+
+# ===================== Links / Bookmarks =====================
+
+def _handle_save_link(text: str) -> str:
+    """Save a URL with optional tags. /save <url> [tag1 tag2 ...]"""
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return "Usage: /save <url> [tag1 tag2 ...]"
+
+    url = parts[1]
+    tags = parts[2:] if len(parts) > 2 else []
+
+    LINKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing
+    links = []
+    if LINKS_FILE.exists():
+        try:
+            links = json.loads(LINKS_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            links = []
+
+    # Try to fetch title
+    title = url
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, method="GET", headers={"User-Agent": "AshleyBot/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read(8192).decode("utf-8", errors="replace")
+            m = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+            if m:
+                title = m.group(1).strip()[:100]
+    except Exception:
+        pass
+
+    links.append({
+        "url": url,
+        "title": title,
+        "tags": tags,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    })
+    LINKS_FILE.write_text(json.dumps(links, indent=2))
+
+    tag_str = f" [{', '.join(tags)}]" if tags else ""
+    return f"🔖 Saved: {title}{tag_str}"
+
+
+def _handle_links(text: str) -> str:
+    """List saved links. /links [tag] to filter."""
+    parts = text.strip().split(maxsplit=1)
+    tag_filter = parts[1].strip().lower() if len(parts) > 1 else ""
+
+    if not LINKS_FILE.exists():
+        return "No saved links yet. Use /save <url> [tags] to add one."
+
+    try:
+        links = json.loads(LINKS_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return "No saved links."
+
+    if tag_filter:
+        links = [l for l in links if tag_filter in [t.lower() for t in l.get("tags", [])]]
+        if not links:
+            return f"No links tagged '{tag_filter}'."
+
+    if not links:
+        return "No saved links."
+
+    lines = [f"🔖 Saved links ({len(links)}):"]
+    for link in links[-15:]:  # Show last 15
+        title = link.get("title", link.get("url", ""))
+        url = link.get("url", "")
+        tags = link.get("tags", [])
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
+        lines.append(f"• {title}{tag_str}")
+        lines.append(f"  {url}")
+    return "\n".join(lines)
+
+
+# ===================== Conversation Memory =====================
+
+def _load_conversation_buffer() -> list[dict]:
+    """Load recent conversation history."""
+    if not CONVERSATION_FILE.exists():
+        return []
+    try:
+        return json.loads(CONVERSATION_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_conversation_buffer(messages: list[dict]) -> None:
+    """Save conversation buffer, keeping only last N messages."""
+    CONVERSATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    trimmed = messages[-CONVERSATION_MAX:]
+    CONVERSATION_FILE.write_text(json.dumps(trimmed, indent=2))
+
+
+def record_conversation(role: str, text: str) -> None:
+    """Record a message to the conversation buffer."""
+    buf = _load_conversation_buffer()
+    buf.append({
+        "role": role,
+        "text": text[:500],
+        "time": datetime.now(timezone.utc).isoformat(),
+    })
+    _save_conversation_buffer(buf)
+
+
+def get_conversation_context() -> str:
+    """Get recent conversation as context string for the planner."""
+    buf = _load_conversation_buffer()
+    if not buf:
+        return ""
+    lines = ["Recent conversation:"]
+    for msg in buf[-10:]:
+        role = msg.get("role", "?")
+        text = msg.get("text", "")
+        lines.append(f"[{role}] {text}")
+    return "\n".join(lines)
+
+
+# ===================== Morning Briefing =====================
+
+def _handle_briefing() -> str:
+    """Generate a morning briefing with available info."""
+    sections = ["☀️ Morning Briefing\n"]
+
+    # Date/time
+    from datetime import timezone as tz
+    import zoneinfo
+    try:
+        est = zoneinfo.ZoneInfo("America/New_York")
+        now_est = datetime.now(est)
+        sections.append(f"📅 {now_est.strftime('%A, %B %-d, %Y — %-I:%M %p %Z')}\n")
+    except Exception:
+        sections.append(f"📅 {datetime.now(timezone.utc).strftime('%A, %B %-d, %Y')} (UTC)\n")
+
+    # Weather
+    if OPENWEATHER_API_KEY:
+        try:
+            weather = _handle_weather("/weather")
+            sections.append(weather + "\n")
+        except Exception:
+            pass
+
+    # Calendar (today)
+    try:
+        gs = _load_google_services()
+        if gs:
+            events = gs.list_events(days=1)
+            if events:
+                sections.append("📆 Today's Schedule:")
+                for ev in events:
+                    start = ev["start"]
+                    if "T" in start:
+                        try:
+                            dt = datetime.fromisoformat(start)
+                            time_str = dt.strftime("%-I:%M %p")
+                        except Exception:
+                            time_str = start
+                    else:
+                        time_str = "All day"
+                    loc = f" @ {ev['location']}" if ev.get("location") else ""
+                    sections.append(f"  {time_str} — {ev['summary']}{loc}")
+                sections.append("")
+            else:
+                sections.append("📆 No events today.\n")
+    except Exception:
+        pass
+
+    # Unread emails
+    try:
+        gs = _load_google_services()
+        if gs:
+            count = gs.count_unread()
+            if count > 0:
+                sections.append(f"📧 {count} unread email(s)")
+                # Show top 3 unread
+                try:
+                    emails = gs.list_emails(query="is:unread", max_results=3)
+                    for e in emails:
+                        sender = e.get("from", "")
+                        if "<" in sender:
+                            sender = sender.split("<")[0].strip().strip('"')
+                        subj = e.get("subject", "(no subject)")[:50]
+                        sections.append(f"  • {sender}: {subj}")
+                except Exception:
+                    pass
+                sections.append("")
+            else:
+                sections.append("📧 Inbox clear — no unread emails.\n")
+    except Exception:
+        pass
+
+    # Pending questions
+    try:
+        count = count_pending_questions()
+        if count > 0:
+            sections.append(f"❓ {count} pending agent question(s) — send /pending to view\n")
+    except Exception:
+        pass
+
+    # Task summary
+    try:
+        task_summary = run_psql(
+            "SELECT "
+            "SUM(CASE WHEN status = 'TODO' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status = 'BLOCKED' THEN 1 ELSE 0 END) "
+            "FROM autonomous_tasks;"
+        )
+        if task_summary:
+            todo, in_prog, blocked = [v.strip() for v in task_summary.split("|", 2)]
+            if int(todo or 0) + int(in_prog or 0) + int(blocked or 0) > 0:
+                sections.append(
+                    f"📋 Tasks: {todo} todo, {in_prog} in progress, {blocked} blocked\n"
+                )
+    except Exception:
+        pass
+
+    # Scheduled jobs running today
+    try:
+        import glob
+        job_count = len(list(SCHEDULED_JOBS_DIR.glob(f"{SCHEDULED_JOBS_PREFIX}*.timer")))
+        if job_count > 0:
+            sections.append(f"⏰ {job_count} active scheduled job(s)\n")
+    except Exception:
+        pass
+
+    # Today's notes
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        note_file = NOTES_DIR / f"{today}.md"
+        if note_file.exists():
+            content = note_file.read_text()
+            note_count = content.count("\n- [")
+            if note_count > 0:
+                sections.append(f"📝 {note_count} note(s) from today\n")
+    except Exception:
+        pass
+
+    return "\n".join(sections).strip()
+
+
+# ===================== Weekly Review =====================
+
+def _handle_weekly_review() -> str:
+    """Generate a weekly review summary."""
+    sections = ["📊 Weekly Review\n"]
+
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+    week_ago_str = week_ago.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Tasks completed this week
+    try:
+        completed = run_psql(
+            f"SELECT COUNT(*) FROM autonomous_tasks "
+            f"WHERE status = 'COMPLETE' AND completed_at >= '{week_ago_str}';"
+        )
+        completed_count = int(completed.strip()) if completed.strip() else 0
+
+        created = run_psql(
+            f"SELECT COUNT(*) FROM autonomous_tasks "
+            f"WHERE created_at >= '{week_ago_str}';"
+        )
+        created_count = int(created.strip()) if created.strip() else 0
+
+        blocked = run_psql(
+            "SELECT COUNT(*) FROM autonomous_tasks WHERE status = 'BLOCKED';"
+        )
+        blocked_count = int(blocked.strip()) if blocked.strip() else 0
+
+        sections.append(
+            f"📋 Tasks: {created_count} created, {completed_count} completed, {blocked_count} still blocked\n"
+        )
+
+        # List completed task names
+        if completed_count > 0:
+            names = run_psql(
+                f"SELECT name FROM autonomous_tasks "
+                f"WHERE status = 'COMPLETE' AND completed_at >= '{week_ago_str}' "
+                f"ORDER BY completed_at DESC LIMIT 10;"
+            )
+            if names:
+                sections.append("Completed:")
+                for name in names.strip().splitlines():
+                    sections.append(f"  ✅ {name.strip()}")
+                sections.append("")
+    except Exception:
+        pass
+
+    # Notes count this week
+    try:
+        NOTES_DIR.mkdir(parents=True, exist_ok=True)
+        note_count = 0
+        for f in NOTES_DIR.glob("*.md"):
+            try:
+                file_date = datetime.strptime(f.stem, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                if file_date >= week_ago:
+                    note_count += f.read_text().count("\n- [")
+            except ValueError:
+                pass
+        if note_count > 0:
+            sections.append(f"📝 {note_count} note(s) captured this week\n")
+    except Exception:
+        pass
+
+    # Links saved this week
+    try:
+        if LINKS_FILE.exists():
+            links = json.loads(LINKS_FILE.read_text())
+            week_links = [
+                l for l in links
+                if l.get("saved_at", "") >= week_ago.isoformat()
+            ]
+            if week_links:
+                sections.append(f"🔖 {len(week_links)} link(s) saved this week\n")
+    except Exception:
+        pass
+
+    # Calendar events this week
+    try:
+        gs = _load_google_services()
+        if gs:
+            events = gs.list_events(days=7)
+            if events:
+                sections.append(f"📆 {len(events)} upcoming event(s) this week\n")
+    except Exception:
+        pass
+
+    # Scheduled jobs
+    try:
+        job_count = len(list(SCHEDULED_JOBS_DIR.glob(f"{SCHEDULED_JOBS_PREFIX}*.timer")))
+        sections.append(f"⏰ {job_count} active scheduled job(s)\n")
+    except Exception:
+        pass
+
+    if len(sections) <= 1:
+        return "📊 Weekly review: No activity data found for this week."
+
+    return "\n".join(sections).strip()
+
+
 def route_text(text: str) -> str:
     if not text.strip():
         return ""
@@ -1240,13 +1925,86 @@ def route_text(text: str) -> str:
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=answer")
         return handle_owner_reply(answer_text)
 
-    if "weather" in lowered:
+    # ---------- Gmail / Calendar ----------
+    if lowered.startswith("/emails"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=emails")
+        return _handle_emails(stripped)
+
+    if lowered.startswith("/email "):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=email-read")
+        return _handle_read_email(stripped)
+
+    if lowered.startswith("/sendemail"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=sendemail")
+        return _handle_send_email(stripped)
+
+    if lowered.startswith("/calendar"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=calendar")
+        return _handle_calendar(stripped)
+
+    if lowered.startswith("/event"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=event")
+        return _handle_create_event(stripped)
+
+    if lowered.startswith("/delevent"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=delevent")
+        return _handle_delete_event(stripped)
+
+    if lowered.startswith("/unread"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=unread")
+        return _handle_unread()
+
+    # ---------- Weather ----------
+    if lowered.startswith("/weather"):
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weather")
-        return "Weather lookup is not configured on this host."
+        return _handle_weather(stripped)
+
+    # ---------- Web Search ----------
+    if lowered.startswith("/search"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=search")
+        return _handle_search(stripped)
+
+    # ---------- Notes ----------
+    if lowered.startswith("/notes"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=notes")
+        return _handle_notes(stripped)
+
+    if lowered.startswith("/note"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=note")
+        return _handle_note(stripped)
+
+    # ---------- Links / Bookmarks ----------
+    if lowered.startswith("/save"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=save-link")
+        return _handle_save_link(stripped)
+
+    if lowered.startswith("/links"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=links")
+        return _handle_links(stripped)
+
+    # ---------- Briefing / Review ----------
+    if lowered.startswith("/briefing"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=briefing")
+        return _handle_briefing()
+
+    if lowered.startswith("/weeklyreview"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weeklyreview")
+        return _handle_weekly_review()
+
+    if "weather" in lowered and not lowered.startswith("/"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weather")
+        return _handle_weather(f"/weather {WEATHER_LOCATION}")
     if should_handle_status(lowered):
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=status")
         return handle_status_query(lowered)
-    spawn_planner(stripped)
+
+    # Record conversation and include context for planner
+    record_conversation("user", stripped)
+    context = get_conversation_context()
+    planner_input = stripped
+    if context and len(context) > 50:
+        planner_input = f"{context}\n\nNew message: {stripped}"
+    spawn_planner(planner_input)
     print(f"[{datetime.now(timezone.utc).isoformat()}] routed=planner")
     preview = stripped.replace("\n", " ")
     if len(preview) > 120:
@@ -1267,11 +2025,48 @@ class RouterHandler(BaseHTTPRequestHandler):
             questions = list_pending_questions_structured()
             self._json_response(200, {"ok": True, "count": len(questions), "questions": questions})
             return
+
+        if self.path == "/gmail/unread":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            count = gs.count_unread()
+            self._json_response(200, {"ok": True, "unread": count})
+            return
+
+        if self.path == "/gmail/inbox":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            emails = gs.list_emails(max_results=10)
+            self._json_response(200, {"ok": True, "emails": emails})
+            return
+
+        if self.path == "/calendar/today":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            events = gs.list_events(days=1)
+            self._json_response(200, {"ok": True, "events": events})
+            return
+
+        if self.path == "/calendar/week":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            events = gs.list_events(days=7)
+            self._json_response(200, {"ok": True, "events": events})
+            return
+
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in {"/route", "/owner-message", "/ask-owner", "/reply"}:
+        if self.path not in {"/route", "/owner-message", "/ask-owner", "/reply", "/gmail/send", "/gmail/read", "/gmail/search", "/calendar/create", "/calendar/delete"}:
             self.send_response(404)
             self.end_headers()
             return
@@ -1303,6 +2098,79 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return
             result = handle_owner_reply(answer)
             self._json_response(200, {"ok": True, "result": result})
+            return
+
+        if self.path == "/gmail/send":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            to = str(payload.get("to", "")).strip()
+            subject = str(payload.get("subject", "")).strip()
+            body = str(payload.get("body", "")).strip()
+            if not to or not subject:
+                self._json_response(400, {"ok": False, "error": "to and subject required"})
+                return
+            result = gs.send_email(to, subject, body)
+            self._json_response(200 if result.get("ok") else 400, result)
+            return
+
+        if self.path == "/gmail/read":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            msg_id = str(payload.get("id", "")).strip()
+            if not msg_id:
+                self._json_response(400, {"ok": False, "error": "id required"})
+                return
+            result = gs.read_email(msg_id)
+            self._json_response(200 if "error" not in result else 400, result)
+            return
+
+        if self.path == "/gmail/search":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            query = str(payload.get("query", "")).strip()
+            max_results = int(payload.get("max_results", 10))
+            emails = gs.list_emails(query=query, max_results=max_results)
+            self._json_response(200, {"ok": True, "emails": emails})
+            return
+
+        if self.path == "/calendar/create":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            summary = str(payload.get("summary", "")).strip()
+            start_time = str(payload.get("start_time", "")).strip()
+            if not summary or not start_time:
+                self._json_response(400, {"ok": False, "error": "summary and start_time required"})
+                return
+            result = gs.create_event(
+                summary=summary,
+                start_time=start_time,
+                end_time=payload.get("end_time"),
+                description=str(payload.get("description", "")),
+                location=str(payload.get("location", "")),
+                all_day=bool(payload.get("all_day", False)),
+            )
+            self._json_response(200 if result.get("ok") else 400, result)
+            return
+
+        if self.path == "/calendar/delete":
+            gs = _load_google_services()
+            if not gs:
+                self._json_response(500, {"ok": False, "error": "Google services not available"})
+                return
+            event_id = str(payload.get("id", "")).strip()
+            if not event_id:
+                self._json_response(400, {"ok": False, "error": "id required"})
+                return
+            result = gs.delete_event(event_id)
+            self._json_response(200 if result.get("ok") else 400, result)
             return
 
         if self.path == "/owner-message":
