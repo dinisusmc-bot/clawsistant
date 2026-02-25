@@ -204,40 +204,371 @@ based_claw/
     └── stop-openclaw-services.sh
 ```
 
-## Setup
+## New Bot Deployment (From Scratch)
 
-1. Clone this repo to `~/based_claw/`
-2. Set up `.env` with required tokens (see below)
-3. Run `python3 deployment/setup.py` to deploy templates to `~/.openclaw/`
-4. Start services: `scripts/start-openclaw-services.sh`
-5. Run Gmail OAuth: `python3 ~/.openclaw/workspace/google-services.py --auth`
+Complete guide to deploying Ashley on a fresh Ubuntu VM.
 
-### Required Environment Variables (`~/.env`)
+### Prerequisites
+
+- **Ubuntu 22.04+** (headless VM, VPS, or bare metal)
+- **4GB+ RAM**, 20GB+ disk
+- **Docker** installed and running
+- **Node.js 20+** and **npm**
+- **Python 3.12+**
+- **Git** with SSH key configured for GitHub
+- An LLM inference server (e.g. [LiteLLM](https://github.com/BerriAI/litellm)) accessible from the VM
+
+### Step 1: System Dependencies
 
 ```bash
-# Telegram
-TELEGRAM_BOT_TOKEN=<bot-token>
-TELEGRAM_CHAT_ID=<your-chat-id>
+sudo apt update && sudo apt install -y \
+    python3 python3-pip postgresql-client curl jq tmux
 
-# OpenClaw
+# Enable lingering so systemd user services survive logout
+sudo loginctl enable-linger $USER
+```
+
+### Step 2: Install OpenClaw
+
+```bash
+mkdir -p ~/.local/openclaw && cd ~/.local/openclaw
+npm init -y && npm install openclaw@2026.2.9
+```
+
+Verify: `node ~/.local/openclaw/node_modules/openclaw/dist/index.js --version`
+
+### Step 3: Set Up PostgreSQL
+
+```bash
+# Option A: Docker (recommended)
+docker run -d --name openclaw-postgres \
+    -e POSTGRES_USER=openclaw \
+    -e POSTGRES_PASSWORD=openclaw_dev_pass \
+    -e POSTGRES_DB=openclaw \
+    -p 5433:5432 \
+    --restart unless-stopped \
+    postgres:16
+
+# Option B: Use the included docker-compose
+cd ~/based_claw/deployment
+docker compose -f docker-compose.openclaw.yml up -d
+```
+
+### Step 4: Create a Telegram Bot
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot`, choose a name and username
+3. Copy the bot token (e.g. `7202673884:AAGjqUoBRf...`)
+4. Message your new bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your `chat_id`
+
+### Step 5: Clone and Configure
+
+```bash
+cd ~ && git clone git@github.com:dinisusmc-bot/clawsistant.git based_claw
+cd ~/based_claw/deployment
+```
+
+Edit the `.env` file with your values:
+
+```bash
+cp .env.example .env   # If .env doesn't exist, create from the template below
+nano .env
+```
+
+#### Required `.env` Values
+
+```bash
+# === Core OpenClaw Gateway ===
+OPENAI_API_KEY=sk-1234                          # API key for your LLM proxy
+OPENAI_TOOLS_API_KEY=sk-1234                    # Can be same as above
+OPENAI_BASE_URL=http://ai-services:8010/v1      # Your LiteLLM / LLM proxy URL
+OPENCLAW_GATEWAY_TOKEN=<random-hex-string>       # Generate: openssl rand -hex 24
+OPENCLAW_GATEWAY_PORT=18789
+OPENCLAW_VERSION=2026.2.9
+OPENCLAW_CLI_PATH=$HOME/.local/openclaw/node_modules/openclaw/dist/index.js
+
+# === Model Selection ===
+PRIMARY_TEXT_MODEL=minimax-m2.5                  # Your primary LLM
+PRIMARY_VISION_MODEL=internvl                    # Vision model (optional)
+EMBEDDINGS_MODEL=bge-small-en-v1.5              # Embedding model for search
+PLANNER_TEMP=0.25
+CODER_TEMP=0.18
+TESTER_TEMP=0.10
+
+# === Telegram ===
+TELEGRAM_BOT_TOKEN=<your-bot-token>
+TELEGRAM_CHAT_ID=<your-chat-id>
+TELEGRAM_ALLOW_FROM=<your-chat-id>              # Comma-separated allowed user IDs
+TELEGRAM_ACK_REACTION=✅
+
+# === PostgreSQL ===
 OPENCLAW_POSTGRES_HOST=localhost
 OPENCLAW_POSTGRES_PORT=5433
 OPENCLAW_POSTGRES_DB=openclaw
 OPENCLAW_POSTGRES_USER=openclaw
-OPENCLAW_POSTGRES_PASSWORD=<password>
+OPENCLAW_POSTGRES_PASSWORD=openclaw_dev_pass
 
-# LLM
-OPENAI_API_KEY=<key>
-OPENAI_BASE_URL=http://ai-services:8010/v1
-PRIMARY_TEXT_MODEL=minimax-m2.5
-EMBEDDINGS_MODEL=bge-small-en-v1.5
+# === Task Manager ===
+MAX_ATTEMPTS=2
+TESTER_MAX_ATTEMPTS=3
+VERBOSE_TASK_LOGS=1
+TASK_HEARTBEAT_SEC=120
+TEST_CLEANUP_AFTER=1
+TESTER_TIMEOUT=2400
+TESTER_STEP_TIMEOUT=600
 
-# Web Search
-SEARXNG_URL=http://localhost:8888
+# === Chat Router ===
+CHAT_ROUTER_PORT=18801
+CHAT_ROUTER_URL=http://127.0.0.1:18801/route
+CHAT_ROUTER_ASK_TIMEOUT_SEC=180
 
-# Weather
-OPENWEATHER_API_KEY=<key>
+# === Model Health ===
+MODEL_HEALTH_RETRIES=2
+MODEL_HEALTH_CONNECT_TIMEOUT_SEC=5
+MODEL_HEALTH_MODELS_TIMEOUT_SEC=20
+MODEL_HEALTH_CHAT_TIMEOUT_SEC=90
+MODEL_HEALTH_EMBED_TIMEOUT_SEC=60
 ```
+
+### Step 6: Deploy
+
+```bash
+cd ~/based_claw/deployment
+python3 setup.py
+```
+
+This will:
+- Copy all templates to `~/.openclaw/`
+- Install and configure all agent SOUL files
+- Set up systemd services and timers
+- Generate `~/.env` with runtime config
+- Enable and start all services
+
+Verify everything is running:
+
+```bash
+systemctl --user list-timers --no-pager
+systemctl --user status openclaw-gateway.service
+systemctl --user status openclaw-chat-router.service
+```
+
+### Step 7: Initialize the Task Database
+
+```bash
+cd ~/.openclaw/workspace
+psql -h localhost -p 5433 -U openclaw -d openclaw -f autonomous-tasks-schema.sql
+```
+
+### Step 8: Create Working Directories
+
+```bash
+mkdir -p ~/.openclaw/workspace/{notes,inbox,memory}
+```
+
+### Step 9: Test the Bot
+
+Send `/help` to your Telegram bot. You should see the full command list.
+
+Test the chat router directly:
+
+```bash
+curl -s -X POST http://127.0.0.1:18801/route \
+    -H "Content-Type: application/json" \
+    -d '{"text":"/briefing"}'
+```
+
+### Step 10: Set Up Gmail & Calendar (Optional)
+
+#### 10a. Google Cloud Console
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (or use existing)
+3. Enable the **Gmail API** and **Google Calendar API**:
+   - APIs & Services → Library → search "Gmail API" → Enable
+   - APIs & Services → Library → search "Google Calendar API" → Enable
+4. Configure OAuth consent screen:
+   - APIs & Services → OAuth consent screen
+   - User type: **External** (or Internal if using Workspace)
+   - Add scopes: `gmail.readonly`, `gmail.send`, `gmail.modify`, `calendar`, `calendar.events`
+   - Add your email as a test user
+5. Create OAuth credentials:
+   - APIs & Services → Credentials → Create Credentials → OAuth client ID
+   - Application type: **Desktop app**
+   - Download the JSON file
+
+#### 10b. Install Python Dependencies
+
+```bash
+pip3 install --user google-auth google-auth-oauthlib google-api-python-client
+```
+
+#### 10c. Run OAuth Flow
+
+```bash
+# Save the downloaded JSON
+cp ~/Downloads/client_secret_*.json ~/.openclaw/google-credentials.json
+
+# Run auth flow
+cd ~/.openclaw/workspace
+python3 google-services.py --auth
+```
+
+A URL will be printed. Open it in your browser, sign in, approve permissions, then copy the redirect URL (it will fail to load — that's expected) and paste it back into the terminal.
+
+#### 10d. Verify
+
+```bash
+python3 google-services.py --test
+```
+
+You should see: `✅ Google authentication is working`
+
+### Step 11: Set Up Web Search (Optional)
+
+Deploy SearXNG for self-hosted web search:
+
+```bash
+docker run -d --name searxng \
+    -p 8888:8080 \
+    -e SEARXNG_SECRET=$(openssl rand -hex 32) \
+    --restart unless-stopped \
+    searxng/searxng:latest
+
+# Enable JSON output format
+docker exec searxng sed -i 's/formats: \[\]/formats: ["json"]/' /etc/searxng/settings.yml 2>/dev/null || \
+docker exec searxng sh -c "sed -i '/^search:/a\\    formats:\\n      - json' /etc/searxng/settings.yml"
+docker restart searxng
+```
+
+Add to `~/.env`:
+
+```bash
+echo "SEARXNG_URL=http://localhost:8888" >> ~/.env
+systemctl --user restart openclaw-chat-router.service
+```
+
+### Step 12: Set Up Weather (Optional)
+
+1. Get a free API key from [OpenWeatherMap](https://openweathermap.org/api) (sign up → API keys)
+2. Add to `~/.env`:
+
+```bash
+echo "OPENWEATHER_API_KEY=<your-key>" >> ~/.env
+systemctl --user restart openclaw-chat-router.service
+```
+
+> **Note:** New OpenWeatherMap keys can take up to 2 hours to activate.
+
+### Step 13: Set Up Email Monitor (Optional)
+
+Requires Gmail to be configured (Step 10).
+
+```bash
+# Create systemd service
+cat > ~/.config/systemd/user/email-monitor.service << 'EOF'
+[Unit]
+Description=Ashley Email Monitor
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/$USER/.openclaw/workspace
+ExecStart=/usr/bin/python3 /home/$USER/.openclaw/workspace/email-monitor.py
+EOF
+
+# Create timer (every 5 minutes)
+cat > ~/.config/systemd/user/email-monitor.timer << 'EOF'
+[Unit]
+Description=Check Gmail every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now email-monitor.timer
+```
+
+### Step 14: Schedule Recurring Jobs (Optional)
+
+```bash
+# Morning briefing at 8 AM daily
+curl -s -X POST http://127.0.0.1:18801/route \
+    -H "Content-Type: application/json" \
+    -d '{"text":"/schedule 0 8 * * * /briefing"}'
+
+# Weekly review on Sundays at 7 PM
+curl -s -X POST http://127.0.0.1:18801/route \
+    -H "Content-Type: application/json" \
+    -d '{"text":"/schedule 0 19 * * 0 /weeklyreview"}'
+```
+
+### Customization
+
+#### Personality
+
+Edit these files in `deployment/templates/workspace/` then re-run `python3 deployment/setup.py`:
+
+| File | Purpose |
+|---|---|
+| `SOUL.md` | Core personality, boundaries, vibe, autonomy preferences |
+| `USER.md` | Owner profile (name, timezone, interests, preferences) |
+| `IDENTITY.md` | Bot name and identity |
+
+#### Agent Behavior
+
+Edit files in `deployment/templates/agents/`:
+
+| File | Purpose |
+|---|---|
+| `planner/agent/SOUL.md` | How the Planner decomposes tasks |
+| `coder/agent/SOUL.md` | How Doer agents execute work |
+| `tester/agent/SOUL.md` | How the Reviewer validates quality |
+
+### Managing Services
+
+```bash
+# View all services
+systemctl --user list-timers --no-pager
+systemctl --user list-units --type=service --no-pager | grep openclaw
+
+# Restart everything
+bash ~/based_claw/scripts/start-openclaw-services.sh
+
+# Stop everything
+bash ~/based_claw/scripts/stop-openclaw-services.sh
+
+# Restart a single service
+systemctl --user restart openclaw-chat-router.service
+
+# View logs
+journalctl --user -u openclaw-chat-router.service -f
+journalctl --user -u openclaw-gateway.service --since "1 hour ago"
+```
+
+### Redeploying After Config Changes
+
+```bash
+cd ~/based_claw/deployment
+python3 setup.py
+systemctl --user restart openclaw-chat-router.service
+```
+
+### Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| Bot not responding | Check `systemctl --user status openclaw-telegram-commands.timer` |
+| Tasks not processing | Check `systemctl --user status openclaw-task-manager-db.timer` |
+| Gateway MODULE_NOT_FOUND | Reinstall: `cd ~/.local/openclaw && npm install openclaw@2026.2.9` |
+| Gmail "Not authenticated" | Re-run `python3 google-services.py --auth` |
+| Weather 401 error | New API keys take up to 2 hours to activate |
+| SearXNG no results | Ensure JSON format is enabled in SearXNG settings |
+| Services die on logout | Run `sudo loginctl enable-linger $USER` |
 
 ## Gaps & Improvement Opportunities
 
