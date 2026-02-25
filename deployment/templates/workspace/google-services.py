@@ -359,6 +359,7 @@ def today_schedule() -> str:
 
 def run_auth_flow():
     """Run the initial OAuth2 authentication flow using OOB/console method for headless servers."""
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     if not CREDENTIALS_FILE.exists():
@@ -385,11 +386,30 @@ def run_auth_flow():
     print("It will fail to load — that's OK!")
     print("Copy the FULL URL from your browser's address bar and paste it here.")
     print("It will look like: http://localhost:18820/?state=...&code=...&scope=...")
+    print("Or you can paste just the 'code' value from the URL.")
     print("=" * 60)
 
-    redirect_response = input("\nPaste the full redirect URL here: ").strip()
+    redirect_response = input("\nPaste the full redirect URL (or just the code): ").strip()
 
-    flow.fetch_token(authorization_response=redirect_response)
+    # Extract the authorization code from the URL or use as-is if it looks like a code
+    from urllib.parse import urlparse, parse_qs
+    code = None
+    if 'code=' in redirect_response:
+        # Auto-prepend http:// if user forgot it
+        if not redirect_response.startswith('http'):
+            redirect_response = 'http://' + redirect_response
+        parsed = urlparse(redirect_response)
+        params = parse_qs(parsed.query)
+        code = params.get('code', [None])[0]
+    else:
+        # User pasted just the code
+        code = redirect_response
+
+    if not code:
+        print("ERROR: Could not extract authorization code from input.")
+        return False
+
+    flow.fetch_token(code=code)
     creds = flow.credentials
     TOKEN_FILE.write_text(creds.to_json())
     print(f"\n✅ Authentication successful! Token saved to {TOKEN_FILE}")
