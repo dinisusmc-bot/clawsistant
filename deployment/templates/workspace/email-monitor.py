@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Email monitor — checks Gmail for new important emails and notifies via Telegram.
+"""Email monitor — checks Gmail for new important emails, sends digest via email.
 
 Runs on a schedule (e.g. every 5 minutes). Tracks seen message IDs to avoid
 duplicate notifications. Aggressively filters spam, marketing, and noise.
+Batches important emails into a single clean HTML digest email + a short
+Telegram ping.
 
 Usage:
     python3 email-monitor.py          # Normal check
     python3 email-monitor.py --dry    # Dry run — show what would notify, don't send
 """
 
+import base64
 import json
 import os
 import re
@@ -16,6 +19,8 @@ import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 # --------------- Config ---------------
@@ -23,10 +28,12 @@ from pathlib import Path
 STATE_FILE = Path.home() / ".openclaw" / "email-monitor-state.json"
 CREDENTIALS_FILE = Path.home() / ".openclaw" / "google-credentials.json"
 TOKEN_FILE = Path.home() / ".openclaw" / "google-token.json"
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "dinisusmc@gmail.com")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 # Max emails to fetch per check
@@ -343,18 +350,15 @@ def load_env():
 
 
 def send_telegram(text: str) -> bool:
-    """Send a message via Telegram bot."""
+    """Send a short text ping via Telegram bot."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
-        print("[email-monitor] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set", file=sys.stderr)
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     data = urllib.parse.urlencode({
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
     }).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     try:
@@ -366,52 +370,131 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-def format_notification(email: dict, importance: int) -> str:
-    """Format an email into a Telegram notification."""
-    # Importance indicator
-    if importance >= 5:
-        icon = "🔴"
-    elif importance >= 4:
-        icon = "🟠"
-    else:
-        icon = "📩"
+def send_digest_email(important_emails: list[dict]) -> bool:
+    """Send a clean HTML digest email with all important new emails."""
+    from googleapiclient.discovery import build
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
-    sender = email.get("from", "Unknown")
-    # Clean up sender display
+    creds = None
+    if TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            TOKEN_FILE.write_text(creds.to_json())
+        else:
+            print("[email-monitor] Gmail not authenticated for sending", file=sys.stderr)
+            return False
+
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+    now = datetime.now()
+    count = len(important_emails)
+    subject = f"📬 {count} new email{'s' if count != 1 else ''} — {now.strftime('%b %-d, %-I:%M %p')}"
+
+    html = _build_digest_html(important_emails, now)
+
+    msg = MIMEMultipart("alternative")
+    msg["To"] = GMAIL_ADDRESS
+    msg["From"] = GMAIL_ADDRESS
+    msg["Subject"] = subject
+    msg.attach(MIMEText(_build_digest_plain(important_emails), "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    try:
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True
+    except Exception as e:
+        print(f"[email-monitor] Send digest error: {e}", file=sys.stderr)
+        return False
+
+
+def _build_digest_html(emails: list[dict], now: datetime) -> str:
+    """Build clean HTML digest email."""
+    rows = ""
+    for em in emails:
+        importance = em.get("_importance", 3)
+        if importance >= 5:
+            badge = '<span style="color:#dc3545;font-weight:bold;">● URGENT</span>'
+            row_bg = "#fff5f5"
+        elif importance >= 4:
+            badge = '<span style="color:#fd7e14;font-weight:bold;">● Important</span>'
+            row_bg = "#fff8f0"
+        else:
+            badge = ""
+            row_bg = "#ffffff"
+
+        sender = _clean_sender(em.get("from", "Unknown"))
+        subject = em.get("subject", "(no subject)")
+        snippet = em.get("snippet", "")
+        date = em.get("date", "")
+
+        # Escape HTML
+        for char, esc in [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;")]:
+            sender = sender.replace(char, esc)
+            subject = subject.replace(char, esc)
+            snippet = snippet.replace(char, esc)
+            date = date.replace(char, esc)
+
+        rows += f"""
+        <tr style="background:{row_bg};">
+            <td style="padding:16px 20px;border-bottom:1px solid #eee;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <strong style="color:#1a1a2e;font-size:15px;">{sender}</strong>
+                    {f'<span style="margin-left:8px;">{badge}</span>' if badge else ''}
+                </div>
+                <div style="color:#2d3748;font-size:14px;font-weight:600;margin-bottom:6px;">{subject}</div>
+                <div style="color:#718096;font-size:13px;line-height:1.4;">{snippet}</div>
+                <div style="color:#a0aec0;font-size:11px;margin-top:6px;">{date}</div>
+            </td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f7f8fc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+    <div style="max-width:600px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:24px 20px;text-align:center;">
+            <h1 style="color:#fff;margin:0;font-size:20px;font-weight:600;">📬 New Emails</h1>
+            <p style="color:rgba(255,255,255,0.85);margin:6px 0 0;font-size:13px;">
+                {len(emails)} message{'s' if len(emails) != 1 else ''} · {now.strftime('%A, %b %-d at %-I:%M %p')}
+            </p>
+        </div>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+            {rows}
+        </table>
+        <div style="padding:16px 20px;text-align:center;color:#a0aec0;font-size:11px;border-top:1px solid #eee;">
+            Ashley Email Monitor · Reply /emails in Telegram to manage
+        </div>
+    </div>
+</body>
+</html>"""
+
+
+def _build_digest_plain(emails: list[dict]) -> str:
+    """Build plain text fallback for digest."""
+    lines = [f"📬 {len(emails)} new email(s)\n"]
+    for em in emails:
+        sender = _clean_sender(em.get("from", "Unknown"))
+        subject = em.get("subject", "(no subject)")
+        snippet = em.get("snippet", "")
+        lines.append(f"From: {sender}")
+        lines.append(f"Subject: {subject}")
+        if snippet:
+            lines.append(f"  {snippet[:120]}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _clean_sender(sender: str) -> str:
+    """Extract clean display name from email sender."""
     if "<" in sender:
         name = sender.split("<")[0].strip().strip('"').strip("'")
         addr = sender.split("<")[1].rstrip(">")
-        if name:
-            sender = f"{name}"
-        else:
-            sender = addr
-    if len(sender) > 40:
-        sender = sender[:37] + "..."
-
-    subject = email.get("subject", "(no subject)")
-    if len(subject) > 80:
-        subject = subject[:77] + "..."
-
-    snippet = email.get("snippet", "")
-    if len(snippet) > 150:
-        snippet = snippet[:147] + "..."
-
-    # Escape HTML
-    for char, esc in [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;")]:
-        sender = sender.replace(char, esc)
-        subject = subject.replace(char, esc)
-        snippet = snippet.replace(char, esc)
-
-    lines = [
-        f"{icon} <b>New Email</b>",
-        f"<b>From:</b> {sender}",
-        f"<b>Subject:</b> {subject}",
-    ]
-    if snippet:
-        lines.append(f"<i>{snippet}</i>")
-    lines.append(f"\n<code>/email {email['id']}</code>")
-
-    return "\n".join(lines)
+        return name if name else addr
+    return sender
 
 
 # --------------- Main ---------------
@@ -436,12 +519,17 @@ def run_check(dry_run: bool = False) -> dict:
         "errors": 0,
     }
 
+    important_emails = []
+
     for email in emails:
         # Skip already-seen
         if email["id"] in seen_ids:
             continue
 
         stats["new"] += 1
+
+        # ALWAYS mark as seen — this is the dedup fix
+        seen_ids.add(email["id"])
 
         # Spam filter
         is_spam, reason = is_spam_or_noise(email)
@@ -453,19 +541,28 @@ def run_check(dry_run: bool = False) -> dict:
 
         # Score importance
         importance = get_importance_score(email)
+        email["_importance"] = importance
 
         if dry_run:
             print(f"  [NOTIFY importance={importance}] {email['from'][:30]} — {email['subject'][:60]}")
-        else:
-            # Send notification
-            msg = format_notification(email, importance)
-            if send_telegram(msg):
-                stats["notified"] += 1
-            else:
-                stats["errors"] += 1
 
-        # Mark as seen regardless
-        seen_ids.add(email["id"])
+        important_emails.append(email)
+
+    # Send batched digest if there are important emails
+    if important_emails and not dry_run:
+        # Send clean HTML digest email
+        if send_digest_email(important_emails):
+            stats["notified"] = len(important_emails)
+        else:
+            stats["errors"] = len(important_emails)
+
+        # Send short Telegram ping (just a count, not the full content)
+        count = len(important_emails)
+        subjects = [e.get("subject", "")[:40] for e in important_emails[:3]]
+        preview = " · ".join(subjects)
+        if count > 3:
+            preview += f" (+{count - 3} more)"
+        send_telegram(f"📬 {count} new email{'s' if count != 1 else ''}: {preview}\nDigest sent to your inbox.")
 
     # Save state
     state["seen_ids"] = list(seen_ids)
