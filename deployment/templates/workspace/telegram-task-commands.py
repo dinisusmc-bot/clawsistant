@@ -447,6 +447,12 @@ def handle_command(text: str) -> str:
             "/save <url> [tags] - bookmark a link\n"
             "/links [tag] - list saved bookmarks\n"
             "\n"
+            "Memory (vector DB):\n"
+            "/remember <fact> - store a fact or preference\n"
+            "/recall <query> - search memories semantically\n"
+            "/forget <id> - delete a memory\n"
+            "/memories - show memory stats\n"
+            "\n"
             "Send a file/photo and it'll be saved to inbox."
         )
 

@@ -46,6 +46,22 @@ NOTES_DIR = Path.home() / ".openclaw" / "workspace" / "notes"
 LINKS_FILE = Path.home() / ".openclaw" / "workspace" / "agent-context" / "bookmarks.json"
 CONVERSATION_FILE = Path.home() / ".openclaw" / "workspace" / ".conversation-buffer.json"
 CONVERSATION_MAX = 20  # max messages to keep in short-term memory
+
+# ---- Vector memory (lazy-loaded) ----
+_vmem = None
+
+def _get_vmem():
+    """Lazy-load the vector memory module."""
+    global _vmem
+    if _vmem is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "vector_memory",
+            Path.home() / ".openclaw" / "workspace" / "vector-memory.py",
+        )
+        _vmem = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_vmem)
+    return _vmem
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
 WEATHER_LOCATION = os.environ.get("WEATHER_LOCATION", "New York,US")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "")  # e.g. http://localhost:8888
@@ -243,6 +259,11 @@ def add_lesson(lesson_text: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     with LESSONS_FILE.open("a") as handle:
         handle.write(f"[{stamp}] {text}\n")
+    # Also store in vector memory for semantic recall
+    try:
+        _get_vmem().store_lesson(text)
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] vmem lesson store error: {exc}")
     return "Lesson saved for future tasks."
 
 
@@ -281,17 +302,21 @@ def add_project_note(raw: str) -> str:
     project_file = PROJECT_CONTEXT_DIR / f"{sanitize_project_name(project_name)}.log"
     with project_file.open("a") as handle:
         handle.write(f"[{stamp}] {note_text}\n")
+    try:
+        _get_vmem().store_project_context(project_name, note_text)
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] vmem project store error: {exc}")
     return f"Saved project context for {project_name}."
 
 
 def planner_context_suffix() -> str:
     lessons = read_recent_lines(LESSONS_FILE, 10)
-    if not lessons:
-        return ""
-
-    lines = ["", "Global lessons learned (apply unless repo state contradicts):"]
-    lines.extend(f"- {entry}" for entry in lessons)
-    return "\n".join(lines) + "\n"
+    parts = []
+    if lessons:
+        parts.append("")
+        parts.append("Global lessons learned (apply unless repo state contradicts):")
+        parts.extend(f"- {entry}" for entry in lessons)
+    return "\n".join(parts) + "\n" if parts else ""
 
 
 def build_planner_prompt(text: str) -> str:
@@ -1432,6 +1457,10 @@ def _handle_note(text: str) -> str:
     else:
         note_file.write_text(f"# Notes — {today}\n\n{entry}")
 
+    try:
+        _get_vmem().store_note(content, date=today)
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] vmem note store error: {exc}")
     return f"📝 Note saved."
 
 
@@ -1511,6 +1540,11 @@ def _handle_save_link(text: str) -> str:
     })
     LINKS_FILE.write_text(json.dumps(links, indent=2))
 
+    try:
+        _get_vmem().store_bookmark(url=url, title=title, tags=",".join(tags))
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] vmem bookmark store error: {exc}")
+
     tag_str = f" [{', '.join(tags)}]" if tags else ""
     return f"🔖 Saved: {title}{tag_str}"
 
@@ -1567,7 +1601,7 @@ def _save_conversation_buffer(messages: list[dict]) -> None:
 
 
 def record_conversation(role: str, text: str) -> None:
-    """Record a message to the conversation buffer."""
+    """Record a message to the conversation buffer and vector memory."""
     buf = _load_conversation_buffer()
     buf.append({
         "role": role,
@@ -1575,6 +1609,16 @@ def record_conversation(role: str, text: str) -> None:
         "time": datetime.now(timezone.utc).isoformat(),
     })
     _save_conversation_buffer(buf)
+    # Store in vector memory for long-term recall
+    try:
+        _get_vmem().store(
+            content=f"[{role}] {text[:500]}",
+            category="conversation",
+            source="telegram",
+            metadata={"role": role, "timestamp": datetime.now(timezone.utc).isoformat()},
+        )
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] vmem conversation store error: {exc}")
 
 
 def get_conversation_context() -> str:
@@ -1588,6 +1632,15 @@ def get_conversation_context() -> str:
         text = msg.get("text", "")
         lines.append(f"[{role}] {text}")
     return "\n".join(lines)
+
+
+def get_memory_context(query: str) -> str:
+    """Get relevant long-term memories for a query."""
+    try:
+        return _get_vmem().recall(query, limit=5)
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] vmem recall error: {exc}")
+        return ""
 
 
 # ===================== Morning Briefing =====================
@@ -1991,6 +2044,62 @@ def route_text(text: str) -> str:
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weeklyreview")
         return _handle_weekly_review()
 
+    # ---------- Memory ----------
+    if lowered.startswith("/remember"):
+        fact = stripped[9:].strip()
+        if not fact:
+            return "Usage: /remember <fact or preference to store>"
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=remember")
+        try:
+            mid = _get_vmem().store_fact(fact)
+            return f"🧠 Remembered (#{mid})."
+        except Exception as exc:
+            return f"Failed to store memory: {exc}"
+
+    if lowered.startswith("/recall"):
+        query = stripped[7:].strip()
+        if not query:
+            return "Usage: /recall <what to search for>"
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=recall")
+        try:
+            results = _get_vmem().search(query, limit=8)
+            if not results:
+                return "No matching memories found."
+            lines = [f"🧠 Memories ({len(results)} matches):"]
+            for m in results:
+                sim = int(m['similarity'] * 100)
+                cat = m['category']
+                content = m['content'][:200]
+                lines.append(f"#{m['id']} [{cat}] ({sim}%) {content}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Memory recall failed: {exc}"
+
+    if lowered.startswith("/forget"):
+        forget_id = stripped[7:].strip()
+        if not forget_id or not forget_id.isdigit():
+            return "Usage: /forget <memory_id>"
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=forget")
+        try:
+            if _get_vmem().delete(int(forget_id)):
+                return f"🗑️ Memory #{forget_id} deleted."
+            return f"Memory #{forget_id} not found."
+        except Exception as exc:
+            return f"Failed to delete memory: {exc}"
+
+    if lowered.startswith("/memories"):
+        print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=memories")
+        try:
+            vmem = _get_vmem()
+            total = vmem.count()
+            cats = vmem.categories()
+            lines = [f"🧠 Memory store: {total} total memories"]
+            for c in cats:
+                lines.append(f"  {c['category']}: {c['count']}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Failed to get memory stats: {exc}"
+
     if "weather" in lowered and not lowered.startswith("/"):
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=weather")
         return _handle_weather(f"/weather {WEATHER_LOCATION}")
@@ -2001,9 +2110,12 @@ def route_text(text: str) -> str:
     # Record conversation and include context for planner
     record_conversation("user", stripped)
     context = get_conversation_context()
+    memory_context = get_memory_context(stripped)
     planner_input = stripped
+    if memory_context:
+        planner_input = f"{memory_context}\n\n{planner_input}"
     if context and len(context) > 50:
-        planner_input = f"{context}\n\nNew message: {stripped}"
+        planner_input = f"{context}\n\nNew message: {planner_input}"
     spawn_planner(planner_input)
     print(f"[{datetime.now(timezone.utc).isoformat()}] routed=planner")
     preview = stripped.replace("\n", " ")
