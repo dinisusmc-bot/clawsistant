@@ -96,6 +96,100 @@ def send_message(text: str) -> None:
     api_request("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
 
 
+def send_message_with_keyboard(text: str, keyboard: list) -> None:
+    """Send a message with an inline keyboard."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    data = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "reply_markup": json.dumps({"inline_keyboard": keyboard}),
+    }
+    api_request("sendMessage", data)
+
+
+def answer_callback(callback_id: str, text: str = "") -> None:
+    """Acknowledge a callback query (required by Telegram API)."""
+    data = {"callback_query_id": callback_id}
+    if text:
+        data["text"] = text
+    api_request("answerCallbackQuery", data)
+
+
+def get_keyboard_for_command(cmd: str, parts: list, response: str) -> list | None:
+    """Return inline keyboard buttons appropriate for a command response."""
+
+    if cmd in ("/help", "help"):
+        return [
+            [
+                {"text": "📊 Tasks", "callback_data": "/tasks"},
+                {"text": "🚫 Blockers", "callback_data": "/blockers"},
+            ],
+            [
+                {"text": "📧 Emails", "callback_data": "/emails"},
+                {"text": "📅 Calendar", "callback_data": "/calendar"},
+            ],
+            [
+                {"text": "❓ Pending", "callback_data": "/pending"},
+                {"text": "🌤 Weather", "callback_data": "/weather"},
+            ],
+        ]
+
+    if cmd == "/tasks":
+        return [
+            [
+                {"text": "📋 Todo", "callback_data": "/todo"},
+                {"text": "🔄 In Progress", "callback_data": "/inprogress"},
+            ],
+            [
+                {"text": "🚫 Blockers", "callback_data": "/blockers"},
+                {"text": "✅ Ready", "callback_data": "/readyfortesting"},
+            ],
+        ]
+
+    if cmd == "/blockers":
+        if "No blocked tasks" not in response:
+            return [[{"text": "🔓 Unblock All → TODO", "callback_data": "/unblock all"}]]
+        return None
+
+    if cmd in ("/todo", "/inprogress", "/readyfortesting"):
+        return [[{"text": "📊 Task Summary", "callback_data": "/tasks"}]]
+
+    if cmd == "/task" and len(parts) >= 2:
+        task_id = parts[1]
+        if "BLOCKED" in response:
+            return [
+                [
+                    {"text": "🔓 Unblock → TODO", "callback_data": f"/unblock {task_id}"},
+                    {"text": "🔄 → In Progress", "callback_data": f"/unblock {task_id} in_progress"},
+                ],
+                [{"text": "🚫 All Blockers", "callback_data": "/blockers"}],
+            ]
+        return [[{"text": "📊 Task Summary", "callback_data": "/tasks"}]]
+
+    if cmd in ("/unblock", "/retry"):
+        if "set to" in response or "Requeued" in response:
+            return [
+                [
+                    {"text": "🚫 View Blockers", "callback_data": "/blockers"},
+                    {"text": "📊 Tasks", "callback_data": "/tasks"},
+                ],
+            ]
+        return None
+
+    if cmd == "/pending":
+        if "No pending" not in response:
+            return [[{"text": "📊 Tasks", "callback_data": "/tasks"}]]
+        return None
+
+    if cmd == "/digest":
+        if "No blocked tasks" not in response:
+            return [[{"text": "🔓 Unblock All → TODO", "callback_data": "/unblock all"}]]
+        return None
+
+    return None
+
+
 def send_reaction(chat_id: str, message_id: int, emoji: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not chat_id or not message_id:
         return False
@@ -544,6 +638,45 @@ def main() -> int:
         print(f"[{datetime.utcnow().isoformat()}] telegram updates={len(updates)}")
     for update in updates:
         update_id = update.get("update_id")
+
+        # Handle inline keyboard button presses (callback queries)
+        callback_query = update.get("callback_query")
+        if callback_query:
+            cb_id = callback_query.get("id", "")
+            cb_data = callback_query.get("data", "")
+            cb_from = callback_query.get("from", {})
+            cb_sender_id = str(cb_from.get("id", ""))
+
+            if TELEGRAM_ALLOW_FROM and cb_sender_id not in TELEGRAM_ALLOW_FROM:
+                answer_callback(cb_id, "⛔ Not authorized")
+                if update_id is not None:
+                    offset = update_id + 1
+                    save_offset(offset)
+                continue
+
+            print(f"[{datetime.utcnow().isoformat()}] telegram callback from {cb_sender_id}: {cb_data}")
+            answer_callback(cb_id)
+
+            if cb_data:
+                if is_local_command(cb_data):
+                    reply = handle_command(cb_data)
+                    cmd = cb_data.strip().split()[0].lower()
+                    keyboard = get_keyboard_for_command(cmd, cb_data.strip().split(), reply or "")
+                else:
+                    reply = route_via_chat_router(cb_data)
+                    keyboard = None
+
+                if reply:
+                    if keyboard:
+                        send_message_with_keyboard(reply, keyboard)
+                    else:
+                        send_message(reply)
+
+            if update_id is not None:
+                offset = update_id + 1
+                save_offset(offset)
+            continue
+
         message = update.get("message") or {}
         chat = message.get("chat") or {}
         sender = message.get("from") or {}
@@ -570,9 +703,12 @@ def main() -> int:
 
         if text:
             stripped = text.strip()
+            keyboard = None
             if is_local_command(stripped):
                 print(f"[{datetime.utcnow().isoformat()}] telegram command from {sender_id or chat_id}")
                 reply = handle_command(text)
+                cmd = stripped.split()[0].lower()
+                keyboard = get_keyboard_for_command(cmd, stripped.split(), reply or "")
             elif not stripped.startswith("/") and has_pending_questions():
                 print(f"[{datetime.utcnow().isoformat()}] telegram auto-answer from {sender_id or chat_id}")
                 reply = route_reply_to_agent(stripped)
@@ -584,7 +720,10 @@ def main() -> int:
                 if not reacted:
                     send_message("✅ received")
             if reply:
-                send_message(reply)
+                if keyboard:
+                    send_message_with_keyboard(reply, keyboard)
+                else:
+                    send_message(reply)
 
         # Handle file uploads (documents, photos, audio, video)
         elif message.get("document"):
