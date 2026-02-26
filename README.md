@@ -22,10 +22,13 @@ Ashley watches your email, manages your calendar, takes notes, runs web searches
                      │  (Python)    │
                      └──────┬───────┘
                             │
-                     ┌──────▼───────┐
-                     │   Telegram   │ ← User interface
-                     │  Bot Daemon  │
-                     └──────────────┘
+              ┌─────────────┼─────────────┐
+              │             │             │
+       ┌──────▼───────┐ ┌───▼──────┐ ┌────▼─────────┐
+       │   Telegram   │ │ Vector   │ │   Email      │
+       │  Bot Daemon  │ │ Memory   │ │   Monitor    │
+       │  (keyboards) │ │ (pgvec)  │ │   (Gmail)    │
+       └──────────────┘ └──────────┘ └──────────────┘
 ```
 
 ### Components
@@ -39,6 +42,7 @@ Ashley watches your email, manages your calendar, takes notes, runs web searches
 | **Email Monitor** | Watches Gmail, filters spam, notifies on Telegram | — |
 | **SearXNG** | Self-hosted web search engine (Docker) | 8888 |
 | **PostgreSQL** | Task DB, question tracking, state | 5433 |
+| **Vector Memory** | Semantic long-term memory (pgvector + fastembed) | — |
 | **LiteLLM Proxy** | Model routing (minimax-m2.5) | 8010 |
 
 ### Agent Pipeline
@@ -103,6 +107,14 @@ Agents can ask the owner clarifying questions via `/pending` and `/answer` when 
 | `/save <url> [tags]` | Save a bookmark with optional tags |
 | `/links` | View recent bookmarks |
 
+#### Memory
+| Command | Description |
+|---|---|
+| `/remember <text>` | Store a memory (fact, preference, lesson) |
+| `/recall <query>` | Search memories by semantic similarity |
+| `/forget <id>` | Delete a specific memory |
+| `/memories` | Show memory stats by category |
+
 #### Scheduling
 | Command | Description |
 |---|---|
@@ -157,13 +169,28 @@ Send documents, photos, or audio to the Telegram bot — files are automatically
 
 Rolling 20-message context buffer maintains conversational continuity across interactions.
 
+### Vector Memory (Long-Term)
+
+Persistent semantic memory powered by **pgvector** and **fastembed**:
+
+- **Storage** — Memories are embedded as 384-dimensional vectors (bge-small-en-v1.5) and stored in PostgreSQL with an HNSW index for fast cosine similarity search.
+- **Auto-capture** — Conversations, lessons learned, notes, bookmarks, and project context are automatically stored as memories during normal use.
+- **Contextual recall** — Before every Planner invocation, the most relevant memories are retrieved and injected as context, giving agents awareness of past interactions and preferences.
+- **Categories** — `conversations`, `lessons`, `notes`, `bookmarks`, `projects`, `facts`
+- **Commands** — `/remember`, `/recall`, `/forget`, `/memories` (see Memory commands above)
+
+### Inline Keyboards
+
+Telegram responses include contextual inline action buttons where applicable. After commands like `/tasks`, `/emails`, `/jobs`, and `/pending`, quick-action keyboards appear allowing one-tap follow-up actions (e.g., view details, retry, delete) without typing commands manually.
+
 ## Tech Stack
 
 | Component | Technology |
 |---|---|
 | Orchestration | OpenClaw v2026.2.9 |
 | LLM | minimax-m2.5 via LiteLLM (self-hosted, zero cost) |
-| Embeddings | bge-small-en-v1.5 |
+| Embeddings | bge-small-en-v1.5 (fastembed, 384-dim) |
+| Vector Store | pgvector 0.8.1 (HNSW index) |
 | Chat Router | Python 3.12 (stdlib HTTP server) |
 | Database | PostgreSQL 16 |
 | Web Search | SearXNG (Docker) |
@@ -196,6 +223,7 @@ based_claw/
 │           ├── telegram-task-commands.py # Telegram polling daemon
 │           ├── google-services.py       # Gmail & Calendar API module
 │           ├── email-monitor.py         # Gmail watcher & notifier
+│           ├── vector-memory.py         # Semantic long-term memory (pgvector)
 │           ├── autonomous-task-manager-db.sh  # Task lifecycle manager
 │           ├── autonomous-tasks-schema.sql    # DB schema
 │           └── telegram-notify.sh       # Notification dispatcher
@@ -359,6 +387,22 @@ cd ~/.openclaw/workspace
 psql -h localhost -p 5433 -U openclaw -d openclaw -f autonomous-tasks-schema.sql
 ```
 
+### Step 7b: Enable Vector Memory (pgvector)
+
+```bash
+# Install the pgvector extension in PostgreSQL
+psql -h localhost -p 5433 -U openclaw -d openclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# Install fastembed for local embeddings
+pip3 install --break-system-packages fastembed
+
+# Initialize the memories table and HNSW index
+cd ~/.openclaw/workspace
+python3 vector-memory.py migrate
+```
+
+> **Note:** The first run of `vector-memory.py` will download the bge-small-en-v1.5 model (~130MB) to `~/.cache/`. Subsequent runs load instantly.
+
 ### Step 8: Create Working Directories
 
 ```bash
@@ -400,6 +444,9 @@ curl -s -X POST http://127.0.0.1:18801/route \
 
 ```bash
 pip3 install --user google-auth google-auth-oauthlib google-api-python-client
+
+# If on Ubuntu 24.04+ with externally-managed Python:
+pip3 install --break-system-packages google-auth google-auth-oauthlib google-api-python-client
 ```
 
 #### 10c. Run OAuth Flow
@@ -568,6 +615,8 @@ systemctl --user restart openclaw-chat-router.service
 | Gmail "Not authenticated" | Re-run `python3 google-services.py --auth` |
 | Weather 401 error | New API keys take up to 2 hours to activate |
 | SearXNG no results | Ensure JSON format is enabled in SearXNG settings |
+| Vector memory empty results | Run `python3 vector-memory.py migrate` to create table & HNSW index |
+| fastembed model slow first load | Normal — first call downloads/loads model (~10-15s). Cached after. |
 | Services die on logout | Run `sudo loginctl enable-linger $USER` |
 
 ## Gaps & Improvement Opportunities
@@ -594,8 +643,8 @@ systemctl --user restart openclaw-chat-router.service
 - **Recurring Task Templates** — Frequently repeated tasks (weekly reports, monthly reviews) should be templateable rather than manually scheduled.
 - **Natural Language Scheduling** — `/schedule` requires cron syntax. Should support "every weekday at 9am" or "remind me every Monday."
 - **Location-Aware Features** — Weather defaults to a fixed city. Could learn home/work locations and auto-contextualize.
-- **Mobile Quick Actions** — Telegram inline keyboards for common actions (approve/reject task, snooze reminder, archive email) instead of typing commands.
-- **Inter-Agent Memory** — Agents start fresh each session. A shared persistent memory (beyond SOUL/USER.md files) would enable learning from past interactions.
+- ~~**Mobile Quick Actions**~~ — ✅ Done. Inline keyboards added for `/tasks`, `/emails`, `/jobs`, `/pending`, and more.
+- ~~**Inter-Agent Memory**~~ — ✅ Done. Vector memory system (pgvector + fastembed) provides persistent semantic recall across sessions.
 - **Dashboard / Web UI** — All interaction is via Telegram text. A simple web dashboard showing tasks, agent status, email queue, and calendar would add visibility.
 - **Backup & Recovery** — No automated backup of the PostgreSQL task DB, notes, bookmarks, or state files.
 - **Multi-User Support** — Currently single-user only. Architecture could extend to support multiple Telegram users with isolated contexts.
