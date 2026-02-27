@@ -161,8 +161,8 @@ send_notification() {
   fi
 }
 
-# Deliver phase results to the owner via chat-router /owner-message.
-# Sends each deliverable file as a separate message with a friendly title.
+# Deliver phase results to the owner via email (HTML-formatted reports).
+# Falls back to Telegram owner-message if email fails.
 deliver_phase_results() {
   local project="$1"
   local phase_name="$2"
@@ -173,6 +173,7 @@ deliver_phase_results() {
   fi
 
   local file_count=0
+  local all_content=""
 
   for dir in "$project_dir/drafts" "$project_dir/research" "$project_dir/analysis" "$project_dir/schedule" "$project_dir/leads"; do
     if [ -d "$dir" ]; then
@@ -209,35 +210,74 @@ if not matched:
 print(matched)
 " "$basename")
 
-        # Read file content (up to 3800 chars to stay under Telegram's 4096 limit)
         local file_content
-        file_content=$(head -c 3800 "$f")
+        file_content=$(cat "$f")
 
         if [ -z "$file_content" ]; then
           continue
         fi
 
-        # Send each file as a separate message
-        local payload
-        payload=$(python3 -c "
+        # Accumulate content for combined email
+        all_content="${all_content}\n\n## ${title}\n\n${file_content}"
+        file_count=$((file_count + 1))
+      done
+    fi
+  done
+
+  if [ "$file_count" -eq 0 ]; then
+    return 0
+  fi
+
+  # Try to send as a single nicely-formatted HTML email
+  local email_ok=0
+  local email_result
+  email_result=$(curl -sS -X POST "http://127.0.0.1:18801/email-report" \
+    -H "Content-Type: application/json" \
+    -d "$(python3 -c "
+import json, sys
+content = sys.stdin.read().strip()
+print(json.dumps({'title': sys.argv[1], 'content': content}))
+" "Daily Reports — $project" <<< "$all_content")" 2>&1) || true
+
+  if echo "$email_result" | grep -qi "emailed\|sent\|ok"; then
+    email_ok=1
+    log "Reports emailed for project=$project phase=$phase_name ($file_count files)"
+    # Send a brief Telegram notification that the email was sent
+    bash "$TELEGRAM_NOTIFY" "owner-message" "owner-message" "Ashley Reports" \
+      "📧 Your daily reports ($file_count files) have been emailed to your inbox." >/dev/null 2>&1 || true
+  fi
+
+  # Fallback: send via Telegram if email failed
+  if [ "$email_ok" -eq 0 ]; then
+    log "Email delivery failed, falling back to Telegram for project=$project"
+    for dir in "$project_dir/drafts" "$project_dir/research" "$project_dir/analysis" "$project_dir/schedule" "$project_dir/leads"; do
+      if [ -d "$dir" ]; then
+        for f in "$dir"/*.md; do
+          [ -f "$f" ] || continue
+          local fb_content
+          fb_content=$(head -c 3800 "$f")
+          [ -z "$fb_content" ] && continue
+          local fb_title
+          fb_title=$(basename "$f" .md | tr '-_' '  ')
+          local payload
+          payload=$(python3 -c "
 import json, sys
 content = sys.stdin.read().strip()
 print(json.dumps({
     'agent': 'reviewer',
     'question': sys.argv[1],
     'response': content
-}))" "$title" <<< "$file_content")
+}))" "📋 $fb_title" <<< "$fb_content")
 
-        curl -sS -X POST "http://127.0.0.1:18801/owner-message" \
-          -H "Content-Type: application/json" \
-          -d "$payload" >/dev/null 2>&1 || true
-
-        file_count=$((file_count + 1))
-
-        # Small delay between messages to avoid Telegram rate limits
-        sleep 1
-      done
-    fi
+          curl -sS -X POST "http://127.0.0.1:18801/owner-message" \
+            -H "Content-Type: application/json" \
+            -d "$payload" >/dev/null 2>&1 || true
+          sleep 1
+        done
+      fi
+    done
+  fi
+}
   done
 }
 

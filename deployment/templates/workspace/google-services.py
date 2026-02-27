@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -183,6 +184,28 @@ def send_email(to: str, subject: str, body: str) -> dict:
         message["from"] = GMAIL_ADDRESS
         message["subject"] = subject
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+        sent = service.users().messages().send(
+            userId="me", body={"raw": raw}
+        ).execute()
+        return {"ok": True, "id": sent.get("id", ""), "threadId": sent.get("threadId", "")}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def send_html_email(to: str, subject: str, html_body: str, plain_fallback: str = "") -> dict:
+    """Send an HTML email. Falls back to plain text for clients that don't support HTML."""
+    service = _get_gmail_service()
+    if not service:
+        return {"error": "Not authenticated"}
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["to"] = to
+        msg["from"] = GMAIL_ADDRESS
+        msg["subject"] = subject
+        if plain_fallback:
+            msg.attach(MIMEText(plain_fallback, "plain"))
+        msg.attach(MIMEText(html_body, "html"))
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
         sent = service.users().messages().send(
             userId="me", body={"raw": raw}
         ).execute()
