@@ -102,8 +102,8 @@ def store(content: str, category: str = "general", source: str = "",
         f"RETURNING id;"
     )
     try:
-        return int(result.strip())
-    except (ValueError, TypeError):
+        return int(result.strip().splitlines()[0])
+    except (ValueError, TypeError, IndexError):
         return None
 
 
@@ -129,8 +129,8 @@ def store_batch(items: list[dict]) -> list[int]:
             f"RETURNING id;"
         )
         try:
-            ids.append(int(result.strip()))
-        except (ValueError, TypeError):
+            ids.append(int(result.strip().splitlines()[0]))
+        except (ValueError, TypeError, IndexError):
             pass
     return ids
 

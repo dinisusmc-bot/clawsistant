@@ -1,0 +1,7 @@
+[Unit]
+Description=Twilio Call Recording Monitor & Transcription
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw/workspace
+ExecStart=/usr/bin/python3 %h/.openclaw/workspace/twilio-call-monitor.py

@@ -125,6 +125,14 @@ def main() -> int:
     copy_tree(workspace_src, workspace_dest)
     mark_executable(workspace_dest)
 
+    # Create Python-importable symlinks (module names use underscores)
+    for name_pair in [("google-services.py", "google_services.py"),
+                      ("microsoft-services.py", "microsoft_services.py")]:
+        target = workspace_dest / name_pair[0]
+        link = workspace_dest / name_pair[1]
+        if target.exists() and not link.exists():
+            link.symlink_to(target)
+
     workspace_coder_src = TEMPLATES_DIR / "workspace-coder"
     workspace_coder_dest = home / ".openclaw" / ".openclaw" / "workspace-coder"
     copy_tree(workspace_coder_src, workspace_coder_dest)
@@ -218,6 +226,19 @@ def main() -> int:
     run(["systemctl", "--user", "enable", "--now", "openclaw-model-health.timer"])
     run(["systemctl", "--user", "enable", "--now", "openclaw-chat-router.service"])
     run(["systemctl", "--user", "enable", "--now", "openclaw-gateway.service"])
+
+    # Optional services — enable if config files exist
+    ms_creds = home / ".openclaw" / "microsoft-credentials.json"
+    if ms_creds.exists():
+        run(["systemctl", "--user", "enable", "--now", "email-monitor.timer"])
+    else:
+        print("Skipping email-monitor.timer (no Microsoft credentials found)")
+
+    twilio_creds = home / ".openclaw" / "twilio-credentials.json"
+    if twilio_creds.exists():
+        run(["systemctl", "--user", "enable", "--now", "twilio-call-monitor.timer"])
+    else:
+        print("Skipping twilio-call-monitor.timer (no Twilio credentials found)")
 
     # Install binaries for enabled skills (best-effort)
     if has_command("apt-get"):

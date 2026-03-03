@@ -1,0 +1,7 @@
+[Unit]
+Description=MS365 Email Monitor with Telegram notifications
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw/workspace
+ExecStart=/usr/bin/python3 %h/.openclaw/workspace/ms365-email-monitor.py
