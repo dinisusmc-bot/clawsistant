@@ -627,6 +627,94 @@ def is_local_command(text: str) -> bool:
     return cmd in local_commands
 
 
+# ── Coding bot approval handler ──────────────────────────────────────────
+
+PENDING_HANDOFFS_FILE = Path.home() / ".openclaw" / "pending-bot-handoffs.json"
+CODING_BOT_URL = os.environ.get(
+    "CODING_BOT_URL", "https://mcp-bot-1.tail0d0958.ts.net/route"
+)
+
+
+def _handle_coding_bot_callback(cb_id: str, cb_data: str) -> None:
+    """Process approve:/reject: callbacks for the coding bot handoff gate."""
+    action, rec_sid = cb_data.split(":", 1)
+
+    pending = _load_pending_handoffs()
+    entry = pending.get(rec_sid)
+
+    if not entry or entry.get("status") != "pending":
+        answer_callback(cb_id, "Already processed")
+        return
+
+    project_name = entry.get("project_name", "Project")
+
+    if action == "approve":
+        result = _send_build_prompt_to_coding_bot(entry["analysis"], rec_sid)
+        if result:
+            entry["status"] = "approved"
+            entry["processed_at"] = datetime.utcnow().isoformat()
+            _save_pending_handoffs(pending)
+            answer_callback(cb_id, f"✅ Sent: {project_name}")
+            send_message(
+                f"✅ APPROVED: {project_name} sent to coding bot\n"
+                f"Bot replied: {result.get('reply', '(sent)')}"
+            )
+        else:
+            answer_callback(cb_id, "❌ Error sending to coding bot")
+            send_message(f"❌ Failed to send {project_name} to coding bot — check logs")
+
+    elif action == "reject":
+        entry["status"] = "rejected"
+        entry["processed_at"] = datetime.utcnow().isoformat()
+        _save_pending_handoffs(pending)
+        answer_callback(cb_id, f"⏭ Skipped: {project_name}")
+        send_message(f"⏭ Skipped: {project_name} — not sent to coding bot")
+
+
+def _send_build_prompt_to_coding_bot(analysis: dict, recording_sid: str) -> dict | None:
+    """POST the build prompt to the coding bot via Tailscale."""
+    proj = analysis.get("project_requirements", {})
+    project_name = proj.get("project_name") or "Project from Call"
+    build_prompt = proj.get("build_prompt", "")
+    caller_name = analysis.get("caller_name", "Unknown")
+    topic = analysis.get("topic", "Call")
+
+    message = (
+        f"BUILD REQUEST from phone call with {caller_name} "
+        f"(topic: {topic}, recording: {recording_sid})\n\n"
+        f"Project: {project_name}\n\n"
+        f"{build_prompt}"
+    )
+
+    url = CODING_BOT_URL
+    payload = json.dumps({"text": message}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        print(f"[{datetime.utcnow().isoformat()}] coding bot handoff OK: {project_name}")
+        return data
+    except Exception as e:
+        print(f"[{datetime.utcnow().isoformat()}] coding bot handoff error: {e}")
+        return None
+
+
+def _load_pending_handoffs() -> dict:
+    if PENDING_HANDOFFS_FILE.exists():
+        try:
+            return json.loads(PENDING_HANDOFFS_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_pending_handoffs(pending: dict) -> None:
+    PENDING_HANDOFFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PENDING_HANDOFFS_FILE.write_text(json.dumps(pending, indent=2))
+
+
 def main() -> int:
     print(
         f"[{datetime.utcnow().isoformat()}] telegram poll start token_len={len(TELEGRAM_BOT_TOKEN)} allow_from={len(TELEGRAM_ALLOW_FROM)}"
@@ -661,6 +749,15 @@ def main() -> int:
                 continue
 
             print(f"[{datetime.utcnow().isoformat()}] telegram callback from {cb_sender_id}: {cb_data}")
+
+            # ── Coding bot approval/rejection callbacks ──
+            if cb_data and (cb_data.startswith("approve:") or cb_data.startswith("reject:")):
+                _handle_coding_bot_callback(cb_id, cb_data)
+                if update_id is not None:
+                    offset = update_id + 1
+                    save_offset(offset)
+                continue
+
             answer_callback(cb_id)
 
             if cb_data:

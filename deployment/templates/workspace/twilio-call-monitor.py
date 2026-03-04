@@ -621,102 +621,18 @@ def _save_pending_handoffs(pending: dict) -> None:
 
 
 def process_pending_approvals() -> dict:
-    """Check Telegram for callback query approvals and process them.
+    """No-op — approvals are now handled by telegram-task-commands.py.
 
-    Returns stats: {approved: N, rejected: N, errors: N}
+    The telegram-task-commands service is the sole consumer of Telegram
+    getUpdates and routes approve:/reject: callbacks directly.  Keeping
+    this stub so callers don't break.
     """
-    stats = {"approved": 0, "rejected": 0, "errors": 0}
-    pending = _load_pending_handoffs()
-    if not pending:
-        return stats
-
-    # Check for callback queries from Telegram
-    callbacks = _get_telegram_callbacks()
-    if not callbacks:
-        return stats
-
-    for cb in callbacks:
-        data = cb.get("data", "")
-        cb_id = cb.get("id", "")
-
-        if ":" not in data:
-            _answer_callback(cb_id, "Unknown action")
-            continue
-
-        action, rec_sid = data.split(":", 1)
-
-        if rec_sid not in pending or pending[rec_sid].get("status") != "pending":
-            _answer_callback(cb_id, "Already processed")
-            continue
-
-        if action == "approve":
-            entry = pending[rec_sid]
-            result = _send_build_prompt(entry["analysis"], rec_sid)
-            if result:
-                pending[rec_sid]["status"] = "approved"
-                project_name = entry.get("project_name", "Project")
-                _answer_callback(cb_id, f"Sent to coder: {project_name}")
-                send_telegram(f"APPROVED: {project_name} sent to coding bot\nBot replied: {result.get('reply', '(sent)')}")
-                stats["approved"] += 1
-            else:
-                _answer_callback(cb_id, "Error sending to coding bot")
-                stats["errors"] += 1
-
-        elif action == "reject":
-            pending[rec_sid]["status"] = "rejected"
-            project_name = pending[rec_sid].get("project_name", "Project")
-            _answer_callback(cb_id, f"Skipped: {project_name}")
-            stats["rejected"] += 1
-
-    _save_pending_handoffs(pending)
-    # Clean up old entries (keep last 50)
-    if len(pending) > 50:
-        sorted_entries = sorted(pending.items(), key=lambda x: x[1].get("created_at", ""), reverse=True)
-        pending = dict(sorted_entries[:50])
-        _save_pending_handoffs(pending)
-
-    return stats
+    return {"approved": 0, "rejected": 0, "errors": 0}
 
 
-def _get_telegram_callbacks() -> list:
-    """Fetch and acknowledge pending callback queries from Telegram."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    # Only get callback_query updates, with a short timeout
-    payload = json.dumps({
-        "timeout": 1,
-        "allowed_updates": ["callback_query"],
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        results = data.get("result", [])
-        callbacks = []
-        max_update_id = 0
-        for update in results:
-            max_update_id = max(max_update_id, update.get("update_id", 0))
-            if "callback_query" in update:
-                callbacks.append(update["callback_query"])
-        # Acknowledge processed updates so they don't repeat
-        if max_update_id > 0:
-            ack_payload = json.dumps({"offset": max_update_id + 1, "timeout": 0}).encode("utf-8")
-            ack_req = urllib.request.Request(url, data=ack_payload, headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(ack_req, timeout=5)
-        return callbacks
-    except Exception as e:
-        print(f"[call-monitor] Telegram getUpdates error: {e}", file=sys.stderr)
-        return []
-
-
-def _answer_callback(callback_query_id: str, text: str) -> None:
-    """Answer a Telegram callback query (dismiss the loading spinner)."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-    payload = json.dumps({"callback_query_id": callback_query_id, "text": text}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req, timeout=5)
-    except Exception:
-        pass
+# _get_telegram_callbacks and _answer_callback removed —
+# approval processing is now handled by telegram-task-commands.py
+# which is the sole consumer of Telegram getUpdates.
 
 
 # ── Memory Storage ─────────────────────────────────────────────────────────
