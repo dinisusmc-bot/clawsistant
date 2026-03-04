@@ -71,7 +71,7 @@ TELEGRAM_ALLOW_FROM = [
     for value in os.environ.get("TELEGRAM_ALLOW_FROM", "").split(",")
     if value.strip()
 ]
-TELEGRAM_ACK_REACTION = os.environ.get("TELEGRAM_ACK_REACTION", "✅")
+TELEGRAM_ACK_REACTION = os.environ.get("TELEGRAM_ACK_REACTION", "👍")
 CHAT_ROUTER_BASE = os.environ.get("CHAT_ROUTER_BASE", "http://127.0.0.1:18801")
 CHAT_ROUTER_URL = os.environ.get("CHAT_ROUTER_URL", f"{CHAT_ROUTER_BASE}/route")
 
@@ -821,7 +821,7 @@ def main() -> int:
             if TELEGRAM_ACK_REACTION and message_id:
                 reacted = send_reaction(chat_id, int(message_id), TELEGRAM_ACK_REACTION)
                 if not reacted:
-                    send_message("✅ received")
+                    send_message("👍 received")
             if reply:
                 if keyboard:
                     send_message_with_keyboard(reply, keyboard)
