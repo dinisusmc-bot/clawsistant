@@ -628,11 +628,11 @@ def queue_ask_agent(question: str) -> tuple[str, str]:
 
 def send_report_email(title: str, content: str) -> tuple[bool, str]:
     """Send a report as a nicely templated HTML email to the owner."""
-    gs = _load_google_services()
-    if not gs:
-        return False, "Google services module not found"
+    ms = _load_ms_services()
+    if not ms:
+        return False, "Microsoft services module not found"
 
-    owner_email = os.environ.get("GMAIL_ADDRESS", "dinisusmc@gmail.com")
+    owner_email = os.environ.get("OWNER_EMAIL", "nick@sempersolved.com")
     date_str = datetime.now().strftime("%B %d, %Y")
 
     # Convert markdown-ish content to simple HTML
@@ -677,15 +677,15 @@ def send_report_email(title: str, content: str) -> tuple[bool, str]:
 </body>
 </html>"""
 
-    result = gs.send_html_email(
-        to=owner_email,
-        subject=f"{title} — {date_str}",
-        html_body=html,
-        plain_fallback=content[:3000],
-    )
-    if "error" in result:
-        return False, f"Email send failed: {result['error']}"
-    return True, "Report emailed"
+    try:
+        ms.send_html_email(
+            to=owner_email,
+            subject=f"{title} — {date_str}",
+            html_body=html,
+        )
+        return True, "Report emailed"
+    except Exception as e:
+        return False, f"Email send failed: {e}"
 
 
 def send_owner_message(agent: str, question: str, response: str) -> tuple[bool, str]:
@@ -1227,14 +1227,14 @@ def handle_owner_reply(answer_text: str) -> str:
     )
 
 
-# ===================== Gmail / Calendar Handlers =====================
+# ===================== Email / Calendar Handlers (Microsoft 365) =====================
 
-def _load_google_services():
-    """Lazy-import google-services module."""
+def _load_ms_services():
+    """Lazy-import microsoft-services module."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "google_services",
-        str(Path.home() / ".openclaw" / "workspace" / "google-services.py"),
+        "microsoft_services",
+        str(Path.home() / ".openclaw" / "workspace" / "microsoft-services.py"),
     )
     if spec and spec.loader:
         mod = importlib.util.module_from_spec(spec)
@@ -1244,30 +1244,41 @@ def _load_google_services():
 
 
 def _handle_emails(text: str) -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
     parts = text.strip().split(maxsplit=1)
     query = parts[1] if len(parts) > 1 else ""
-    emails = gs.list_emails(query=query, max_results=10)
+    if query:
+        emails = ms.search_emails(query=query, count=10)
+    else:
+        emails = ms.list_emails(count=10)
     if not emails:
-        return "No emails found." if query else "Inbox is empty (or not authenticated)."
-    return gs._format_email_list(emails)
+        return "No emails found." if query else "Inbox is empty."
+    lines = []
+    for e in emails:
+        flag = "●" if not e.get("is_read", True) else " "
+        sender = e.get("from_name") or e.get("from", "")
+        subj = e.get("subject", "(no subject)")[:50]
+        lines.append(f"  {flag} {sender[:30]:30s}  {subj}")
+        lines.append(f"    ID: {e['id'][:20]}...  Date: {e.get('date', '')}")
+    return "\n".join(lines)
 
 
 def _handle_read_email(text: str) -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
     parts = text.strip().split()
     if len(parts) < 2:
         return "Usage: /email <message_id>"
-    msg = gs.read_email(parts[1])
+    msg = ms.read_email(parts[1])
     if "error" in msg:
         return f"Error: {msg['error']}"
+    to_str = ", ".join(msg.get("to", []))
     lines = [
-        f"From: {msg['from']}",
-        f"To: {msg['to']}",
+        f"From: {msg.get('from_name', '')} <{msg['from']}>",
+        f"To: {to_str}",
         f"Subject: {msg['subject']}",
         f"Date: {msg['date']}",
         "",
@@ -1277,9 +1288,9 @@ def _handle_read_email(text: str) -> str:
 
 
 def _handle_send_email(text: str) -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
     # Format: /sendemail to@email.com | subject | body
     content = text.strip()
     if content.lower().startswith("/sendemail"):
@@ -1294,30 +1305,44 @@ def _handle_send_email(text: str) -> str:
     body = parts[2].strip()
     if not to or not subject:
         return "Both recipient and subject are required."
-    result = gs.send_email(to, subject, body)
-    if "error" in result:
-        return f"Send failed: {result['error']}"
-    return f"✅ Email sent to {to}\nSubject: {subject}"
+    try:
+        result = ms.send_email(to, subject, body)
+        return f"✅ Email sent to {to} (from nick@sempersolved.com)\nSubject: {subject}"
+    except Exception as e:
+        return f"Send failed: {e}"
 
 
 def _handle_calendar(text: str) -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
     parts = text.strip().split()
     days = 7
     if len(parts) >= 2 and parts[1].isdigit():
         days = int(parts[1])
-    events = gs.list_events(days=days)
+    events = ms.list_events(days=days)
     if not events:
         return f"No events in the next {days} day(s)."
-    return gs._format_event_list(events)
+    lines = [f"📆 Calendar — next {days} day(s):"]
+    for ev in events:
+        start = ev.get("start", "")
+        if "T" in start:
+            try:
+                dt = datetime.fromisoformat(start.rstrip("Z"))
+                time_str = dt.strftime("%-I:%M %p")
+            except Exception:
+                time_str = start
+        else:
+            time_str = "All day"
+        loc = f" @ {ev['location']}" if ev.get("location") else ""
+        lines.append(f"  {time_str} — {ev.get('subject', '(no title)')}{loc}")
+    return "\n".join(lines)
 
 
 def _handle_create_event(text: str) -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
     # Format: /event 2026-02-23T14:00 | Meeting title | optional description | optional location
     content = text.strip()
     if content.lower().startswith("/event"):
@@ -1331,47 +1356,70 @@ def _handle_create_event(text: str) -> str:
     parts = content.split("|")
     if len(parts) < 2:
         return "At minimum: /event <start_time> | <title>"
-    start_time = parts[0].strip()
-    summary = parts[1].strip()
+    start_str = parts[0].strip()
+    subject = parts[1].strip()
     description = parts[2].strip() if len(parts) > 2 else ""
     location = parts[3].strip() if len(parts) > 3 else ""
-    all_day = "T" not in start_time and len(start_time) == 10
+    is_all_day = "T" not in start_str and len(start_str) == 10
 
-    result = gs.create_event(
-        summary=summary,
-        start_time=start_time,
-        description=description,
-        location=location,
-        all_day=all_day,
-    )
-    if "error" in result:
-        return f"Failed to create event: {result['error']}"
-    return f"✅ Event created: {result.get('summary', summary)}\nStart: {start_time}"
+    # Compute end time (1 hour after start, or next day for all-day)
+    if is_all_day:
+        from datetime import timedelta as _td
+        try:
+            d = datetime.strptime(start_str, "%Y-%m-%d")
+            end_str = (d + _td(days=1)).strftime("%Y-%m-%dT00:00:00")
+            start_str = start_str + "T00:00:00"
+        except Exception:
+            end_str = start_str + "T23:59:00"
+            start_str = start_str + "T00:00:00"
+    else:
+        try:
+            d = datetime.fromisoformat(start_str)
+            end_str = (d + timedelta(hours=1)).isoformat()
+        except Exception:
+            end_str = start_str  # fallback
+
+    try:
+        result = ms.create_event(
+            subject=subject,
+            start=start_str,
+            end=end_str,
+            body=f"<p>{description}</p>" if description else None,
+            location=location or None,
+            is_all_day=is_all_day,
+        )
+        link = result.get("link", "")
+        link_str = f"\nLink: {link}" if link else ""
+        return f"✅ Event created: {result.get('subject', subject)}\nStart: {start_str}{link_str}"
+    except Exception as e:
+        return f"Failed to create event: {e}"
 
 
 def _handle_delete_event(text: str) -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
     parts = text.strip().split()
     if len(parts) < 2:
         return "Usage: /delevent <event_id>"
-    result = gs.delete_event(parts[1])
-    if "error" in result:
-        return f"Failed: {result['error']}"
-    return f"✅ Event deleted."
+    try:
+        ms.delete_event(parts[1])
+        return "✅ Event deleted."
+    except Exception as e:
+        return f"Failed: {e}"
 
 
 def _handle_unread() -> str:
-    gs = _load_google_services()
-    if not gs:
-        return "Google services module not found."
-    count = gs.count_unread()
-    if count < 0:
-        return "Not authenticated with Gmail."
-    if count == 0:
-        return "📧 No unread emails."
-    return f"📧 {count} unread email(s)."
+    ms = _load_ms_services()
+    if not ms:
+        return "Microsoft services module not found."
+    try:
+        count = ms.count_unread()
+        if count == 0:
+            return "📧 No unread emails."
+        return f"📧 {count} unread email(s)."
+    except Exception as e:
+        return f"Email error: {e}"
 
 
 # ===================== Weather =====================
@@ -1731,23 +1779,23 @@ def _handle_briefing() -> str:
 
     # Calendar (today)
     try:
-        gs = _load_google_services()
-        if gs:
-            events = gs.list_events(days=1)
+        ms = _load_ms_services()
+        if ms:
+            events = ms.list_events(days=1)
             if events:
                 sections.append("📆 Today's Schedule:")
                 for ev in events:
-                    start = ev["start"]
+                    start = ev.get("start", "")
                     if "T" in start:
                         try:
-                            dt = datetime.fromisoformat(start)
+                            dt = datetime.fromisoformat(start.rstrip("Z"))
                             time_str = dt.strftime("%-I:%M %p")
                         except Exception:
                             time_str = start
                     else:
                         time_str = "All day"
                     loc = f" @ {ev['location']}" if ev.get("location") else ""
-                    sections.append(f"  {time_str} — {ev['summary']}{loc}")
+                    sections.append(f"  {time_str} — {ev.get('subject', '(no title)')}{loc}")
                 sections.append("")
             else:
                 sections.append("📆 No events today.\n")
@@ -1756,18 +1804,16 @@ def _handle_briefing() -> str:
 
     # Unread emails
     try:
-        gs = _load_google_services()
-        if gs:
-            count = gs.count_unread()
+        ms = _load_ms_services()
+        if ms:
+            count = ms.count_unread()
             if count > 0:
                 sections.append(f"📧 {count} unread email(s)")
                 # Show top 3 unread
                 try:
-                    emails = gs.list_emails(query="is:unread", max_results=3)
+                    emails = ms.list_emails(count=3, filter_unread=True)
                     for e in emails:
-                        sender = e.get("from", "")
-                        if "<" in sender:
-                            sender = sender.split("<")[0].strip().strip('"')
+                        sender = e.get("from_name") or e.get("from", "")
                         subj = e.get("subject", "(no subject)")[:50]
                         sections.append(f"  • {sender}: {subj}")
                 except Exception:
@@ -1908,9 +1954,9 @@ def _handle_weekly_review() -> str:
 
     # Calendar events this week
     try:
-        gs = _load_google_services()
-        if gs:
-            events = gs.list_events(days=7)
+        ms = _load_ms_services()
+        if ms:
+            events = ms.list_events(days=7)
             if events:
                 sections.append(f"📆 {len(events)} upcoming event(s) this week\n")
     except Exception:
@@ -2040,7 +2086,7 @@ def route_text(text: str) -> str:
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=answer")
         return handle_owner_reply(answer_text)
 
-    # ---------- Gmail / Calendar ----------
+    # ---------- Email / Calendar (Microsoft 365) ----------
     if lowered.startswith("/emails"):
         print(f"[{datetime.now(timezone.utc).isoformat()}] routed=local kind=emails")
         return _handle_emails(stripped)
@@ -2200,39 +2246,39 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"ok": True, "count": len(questions), "questions": questions})
             return
 
-        if self.path == "/gmail/unread":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+        if self.path == "/email/unread":
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
-            count = gs.count_unread()
+            count = ms.count_unread()
             self._json_response(200, {"ok": True, "unread": count})
             return
 
-        if self.path == "/gmail/inbox":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+        if self.path == "/email/inbox":
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
-            emails = gs.list_emails(max_results=10)
+            emails = ms.list_emails(count=10)
             self._json_response(200, {"ok": True, "emails": emails})
             return
 
         if self.path == "/calendar/today":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
-            events = gs.list_events(days=1)
+            events = ms.today_schedule()
             self._json_response(200, {"ok": True, "events": events})
             return
 
         if self.path == "/calendar/week":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
-            events = gs.list_events(days=7)
+            events = ms.list_events(days=7)
             self._json_response(200, {"ok": True, "events": events})
             return
 
@@ -2240,7 +2286,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in {"/route", "/owner-message", "/email-report", "/ask-owner", "/reply", "/gmail/send", "/gmail/read", "/gmail/search", "/calendar/create", "/calendar/delete"}:
+        if self.path not in {"/route", "/owner-message", "/email-report", "/ask-owner", "/reply", "/email/send", "/email/read", "/email/search", "/calendar/create", "/calendar/delete"}:
             self.send_response(404)
             self.end_headers()
             return
@@ -2274,10 +2320,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"ok": True, "result": result})
             return
 
-        if self.path == "/gmail/send":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+        if self.path == "/email/send":
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
             to = str(payload.get("to", "")).strip()
             subject = str(payload.get("subject", "")).strip()
@@ -2285,66 +2331,88 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not to or not subject:
                 self._json_response(400, {"ok": False, "error": "to and subject required"})
                 return
-            result = gs.send_email(to, subject, body)
-            self._json_response(200 if result.get("ok") else 400, result)
+            try:
+                ms.send_email(to, subject, body)
+                self._json_response(200, {"ok": True})
+            except Exception as e:
+                self._json_response(500, {"ok": False, "error": str(e)})
             return
 
-        if self.path == "/gmail/read":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+        if self.path == "/email/read":
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
             msg_id = str(payload.get("id", "")).strip()
             if not msg_id:
                 self._json_response(400, {"ok": False, "error": "id required"})
                 return
-            result = gs.read_email(msg_id)
-            self._json_response(200 if "error" not in result else 400, result)
+            try:
+                result = ms.read_email(msg_id)
+                self._json_response(200, result)
+            except Exception as e:
+                self._json_response(500, {"ok": False, "error": str(e)})
             return
 
-        if self.path == "/gmail/search":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+        if self.path == "/email/search":
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
             query = str(payload.get("query", "")).strip()
             max_results = int(payload.get("max_results", 10))
-            emails = gs.list_emails(query=query, max_results=max_results)
+            emails = ms.search_emails(query=query, count=max_results)
             self._json_response(200, {"ok": True, "emails": emails})
             return
 
         if self.path == "/calendar/create":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
-            summary = str(payload.get("summary", "")).strip()
-            start_time = str(payload.get("start_time", "")).strip()
-            if not summary or not start_time:
-                self._json_response(400, {"ok": False, "error": "summary and start_time required"})
+            subject = str(payload.get("subject", payload.get("summary", ""))).strip()
+            start = str(payload.get("start", payload.get("start_time", ""))).strip()
+            end = str(payload.get("end", payload.get("end_time", ""))).strip()
+            if not subject or not start:
+                self._json_response(400, {"ok": False, "error": "subject and start required"})
                 return
-            result = gs.create_event(
-                summary=summary,
-                start_time=start_time,
-                end_time=payload.get("end_time"),
-                description=str(payload.get("description", "")),
-                location=str(payload.get("location", "")),
-                all_day=bool(payload.get("all_day", False)),
-            )
-            self._json_response(200 if result.get("ok") else 400, result)
+            # Default end to 1 hour after start
+            if not end:
+                try:
+                    from datetime import timedelta as _td
+                    d = datetime.fromisoformat(start)
+                    end = (d + _td(hours=1)).isoformat()
+                except Exception:
+                    end = start
+            try:
+                result = ms.create_event(
+                    subject=subject,
+                    start=start,
+                    end=end,
+                    location=str(payload.get("location", "")) or None,
+                    body=str(payload.get("description", payload.get("body", ""))) or None,
+                    attendees=payload.get("attendees"),
+                    is_all_day=bool(payload.get("all_day", payload.get("is_all_day", False))),
+                )
+                self._json_response(200, {"ok": True, **result})
+            except Exception as e:
+                self._json_response(500, {"ok": False, "error": str(e)})
             return
 
         if self.path == "/calendar/delete":
-            gs = _load_google_services()
-            if not gs:
-                self._json_response(500, {"ok": False, "error": "Google services not available"})
+            ms = _load_ms_services()
+            if not ms:
+                self._json_response(500, {"ok": False, "error": "Microsoft services not available"})
                 return
             event_id = str(payload.get("id", "")).strip()
             if not event_id:
                 self._json_response(400, {"ok": False, "error": "id required"})
                 return
-            result = gs.delete_event(event_id)
-            self._json_response(200 if result.get("ok") else 400, result)
+            try:
+                ms.delete_event(event_id)
+                self._json_response(200, {"ok": True})
+            except Exception as e:
+                self._json_response(500, {"ok": False, "error": str(e)})
             return
 
         if self.path == "/email-report":

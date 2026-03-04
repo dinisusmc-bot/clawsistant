@@ -48,42 +48,44 @@ The question is delivered to Nick via Telegram. His answer will be appended to t
 
 ---
 
-# Skill: Gmail
+# Skill: Email (Microsoft 365)
 
-You can read, search, and send emails through the owner's Gmail account (dinisusmc@gmail.com).
+Read, search, and send emails via the owner's business email (**nick@sempersolved.com**) using Microsoft Graph API.
 
 ## Read Inbox
 
 ```bash
-curl -s http://127.0.0.1:18801/gmail/inbox
+curl -s -X POST http://127.0.0.1:18801/route \
+  -H "Content-Type: application/json" \
+  -d '{"text": "/emails"}'
 ```
 
-Returns: `{"ok": true, "emails": [{"id", "from", "to", "subject", "date", "snippet", "unread"}]}`
-
-## Check Unread Count
-
-```bash
-curl -s http://127.0.0.1:18801/gmail/unread
-```
-
-Returns: `{"ok": true, "unread": 5}`
+Returns a formatted list of recent emails with sender, subject, date, and message ID.
 
 ## Search Emails
 
 ```bash
-curl -s -X POST http://127.0.0.1:18801/gmail/search \
+curl -s -X POST http://127.0.0.1:18801/route \
   -H "Content-Type: application/json" \
-  -d '{"query": "from:someone@example.com subject:invoice", "max_results": 5}'
+  -d '{"text": "/emails invoice from:gary"}'
 ```
 
-Uses Gmail search syntax: `from:`, `to:`, `subject:`, `is:unread`, `after:2026/02/01`, etc.
+Searches subject, body, and sender via Microsoft Graph.
+
+## Check Unread Count
+
+```bash
+curl -s -X POST http://127.0.0.1:18801/route \
+  -H "Content-Type: application/json" \
+  -d '{"text": "/unread"}'
+```
 
 ## Read a Specific Email
 
 ```bash
-curl -s -X POST http://127.0.0.1:18801/gmail/read \
+curl -s -X POST http://127.0.0.1:18801/route \
   -H "Content-Type: application/json" \
-  -d '{"id": "MESSAGE_ID_FROM_INBOX"}'
+  -d '{"text": "/email MESSAGE_ID"}'
 ```
 
 Returns full email body. Automatically marks as read.
@@ -91,64 +93,101 @@ Returns full email body. Automatically marks as read.
 ## Send an Email
 
 ```bash
-curl -s -X POST http://127.0.0.1:18801/gmail/send \
+curl -s -X POST http://127.0.0.1:18801/route \
   -H "Content-Type: application/json" \
-  -d '{"to": "recipient@example.com", "subject": "Hello", "body": "Email body text"}'
+  -d '{"text": "/sendemail recipient@example.com | Subject line | Body text"}'
+```
+
+Sends from **nick@sempersolved.com**. Separate fields with `|`.
+
+## Using the Python Library Directly
+
+```python
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path.home() / ".openclaw/workspace"))
+from microsoft_services import (
+    list_emails, read_email, send_email, send_html_email,
+    count_unread, search_emails, reply_to_email
+)
 ```
 
 **Important:** Only send emails when explicitly instructed by the owner. Never send unsolicited emails.
 
 ---
 
-# Skill: Google Calendar
+# Skill: Calendar (Microsoft 365)
 
-You can view, create, and delete calendar events for the owner.
+View, create, and delete calendar events on the owner's Microsoft 365 calendar (**nick@sempersolved.com**).
 
 ## View Today's Events
 
 ```bash
-curl -s http://127.0.0.1:18801/calendar/today
+curl -s -X POST http://127.0.0.1:18801/route \
+  -H "Content-Type: application/json" \
+  -d '{"text": "/calendar 1"}'
 ```
 
 ## View This Week's Events
 
 ```bash
-curl -s http://127.0.0.1:18801/calendar/week
+curl -s -X POST http://127.0.0.1:18801/route \
+  -H "Content-Type: application/json" \
+  -d '{"text": "/calendar"}'
 ```
 
-Returns: `{"ok": true, "events": [{"id", "summary", "start", "end", "location", "description", "status"}]}`
+Returns a formatted list of events with time, subject, and location.
 
 ## Create an Event
 
 ```bash
-curl -s -X POST http://127.0.0.1:18801/calendar/create \
+curl -s -X POST http://127.0.0.1:18801/route \
   -H "Content-Type: application/json" \
-  -d '{"summary": "Meeting", "start_time": "2026-02-23T14:00:00", "end_time": "2026-02-23T15:00:00", "description": "Discuss roadmap", "location": "Zoom"}'
+  -d '{"text": "/event 2026-03-04T14:00 | Meeting with Bob | Discuss contract | Zoom"}'
 ```
 
-- **summary** (required): Event title
-- **start_time** (required): ISO datetime or YYYY-MM-DD for all-day
-- **end_time** (optional): defaults to 1 hour after start
+- **start_time** (required): ISO datetime `YYYY-MM-DDTHH:MM` or date `YYYY-MM-DD` for all-day
+- **title** (required): Event subject
 - **description** (optional): Event details
 - **location** (optional): Where
-- **all_day** (optional): boolean, set true for all-day events
 
-Times default to EST (America/New_York).
+Times default to **EST (America/New_York)**.
 
 ## Delete an Event
 
 ```bash
-curl -s -X POST http://127.0.0.1:18801/calendar/delete \
+curl -s -X POST http://127.0.0.1:18801/route \
   -H "Content-Type: application/json" \
-  -d '{"id": "EVENT_ID"}'
+  -d '{"text": "/delevent EVENT_ID"}'
+```
+
+## Using the Python Library Directly
+
+```python
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path.home() / ".openclaw/workspace"))
+from microsoft_services import (
+    list_events, create_event, delete_event, today_schedule
+)
+
+# Create a timed event
+result = create_event(
+    subject="Team Meeting",
+    start="2026-03-04T14:00:00",
+    end="2026-03-04T15:00:00",
+    location="Office",
+    body="<p>Discuss roadmap</p>"
+)
+print(result)  # {id, subject, start, end, link}
 ```
 
 ## Guidelines
 
-- When creating events, always use the owner's timezone (EST / America/New_York)
-- Include relevant details in the description
-- If a task mentions scheduling something, create a calendar event for it
-- When reporting the owner's schedule, check `/calendar/today` or `/calendar/week`
+- **All times are in America/New_York (EST/EDT)** unless the user specifies otherwise.
+- When listing events, format them in a human-readable way (time + title + location).
+- Include the event `link` (webLink) when creating events so the user can open in Outlook.
+- **Never delete events unless explicitly instructed by the owner.**
+- If creating an event with attendees, confirm with the user first (it sends invitations).
+- When the owner says "schedule a meeting tomorrow at 2pm", parse the natural language into ISO format and create the event.
 
 ---
 
