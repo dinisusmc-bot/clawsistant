@@ -901,10 +901,10 @@ def run_check(dry_run: bool = False) -> dict:
 
     for rec in new_recordings:
         rec_sid = rec["sid"]
-        seen_sids.add(rec_sid)
 
         duration = int(rec.get("duration", 0) or 0)
         if duration < 5:
+            seen_sids.add(rec_sid)
             stats["skipped"] += 1
             if dry_run:
                 print(f"  [SKIP] {rec_sid} -- too short ({duration}s)")
@@ -913,6 +913,7 @@ def run_check(dry_run: bool = False) -> dict:
         call_info = get_call_info(client, rec["call_sid"])
 
         if dry_run:
+            seen_sids.add(rec_sid)
             print(f"  [NEW] {rec_sid} | {call_info.get('from', '?')} -> {call_info.get('to', '?')} | {duration}s")
             continue
 
@@ -920,11 +921,13 @@ def run_check(dry_run: bool = False) -> dict:
         audio_path = download_recording(rec_sid)
         if not audio_path:
             stats["errors"] += 1
+            # Don't mark as seen — retry on next run
             continue
 
         # Step 2: Transcribe
         transcript = transcribe_recording(audio_path)
         if not transcript or transcript.startswith("(empty"):
+            seen_sids.add(rec_sid)  # Mark seen — no useful content to retry
             stats["skipped"] += 1
             continue
 
@@ -933,8 +936,11 @@ def run_check(dry_run: bool = False) -> dict:
         if not analysis:
             send_telegram(f"New call ({duration}s) -- analysis failed\n\nTranscript preview:\n{transcript[:500]}")
             stats["errors"] += 1
+            # Don't mark as seen — retry on next run
             continue
 
+        # Mark as seen now that we have successful analysis
+        seen_sids.add(rec_sid)
         stats["processed"] += 1
 
         # Step 4: Create calendar events
