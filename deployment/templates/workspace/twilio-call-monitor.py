@@ -342,6 +342,9 @@ def analyze_transcript(transcript: str, call_info: dict, recording: dict) -> dic
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
 
+        # Strip <think>...</think> reasoning blocks (some models emit these)
+        content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+
         # Parse JSON from response (handle markdown fencing if present)
         if content.startswith("```"):
             content = re.sub(r"^```(?:json)?\s*\n?", "", content)
