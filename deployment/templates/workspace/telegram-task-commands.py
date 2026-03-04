@@ -680,7 +680,7 @@ def _send_build_prompt_to_coding_bot(analysis: dict, recording_sid: str) -> dict
     topic = analysis.get("topic", "Call")
 
     message = (
-        f"BUILD REQUEST from phone call with {caller_name} "
+        f"/think BUILD REQUEST from phone call with {caller_name} "
         f"(topic: {topic}, recording: {recording_sid})\n\n"
         f"Project: {project_name}\n\n"
         f"{build_prompt}"
