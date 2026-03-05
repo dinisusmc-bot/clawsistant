@@ -16,13 +16,18 @@ Usage:
     python3 twilio-call-monitor.py --daemon   # Continuous polling
 """
 
+import array
 import json
+import math
 import os
 import re
+import struct
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -150,33 +155,135 @@ def download_recording(recording_sid: str) -> Path | None:
         return None
 
 
+# ── Audio Processing ───────────────────────────────────────────────────────
+
+MAX_CHUNK_SECS = 25  # Keep under Whisper's 30s limit with margin
+
+
+def _stereo_to_mono(audio_path: Path) -> Path:
+    """Convert stereo WAV to mono by mixing both channels. Returns path to mono file."""
+    with wave.open(str(audio_path)) as wf:
+        nchannels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        framerate = wf.getframerate()
+        nframes = wf.getnframes()
+        raw = wf.readframes(nframes)
+
+    if nchannels == 1:
+        return audio_path  # Already mono
+
+    # Mix stereo channels
+    samples = struct.unpack("<" + "h" * (nframes * nchannels), raw)
+    mono = array.array("h")
+    for i in range(nframes):
+        mixed = sum(samples[i * nchannels + ch] for ch in range(nchannels)) // nchannels
+        mono.append(max(-32768, min(32767, mixed)))
+
+    mono_path = audio_path.with_suffix(".mono.wav")
+    with wave.open(str(mono_path), "w") as out:
+        out.setnchannels(1)
+        out.setsampwidth(sampwidth)
+        out.setframerate(framerate)
+        out.writeframes(mono.tobytes())
+
+    return mono_path
+
+
+def _chunk_audio(mono_path: Path) -> list[Path]:
+    """Split a mono WAV into <=25s chunks. Returns list of chunk paths."""
+    with wave.open(str(mono_path)) as wf:
+        framerate = wf.getframerate()
+        nframes = wf.getnframes()
+        sampwidth = wf.getsampwidth()
+        raw = wf.readframes(nframes)
+
+    duration = nframes / framerate
+    if duration <= MAX_CHUNK_SECS:
+        return [mono_path]
+
+    chunk_frames = MAX_CHUNK_SECS * framerate
+    bytes_per_frame = sampwidth  # mono
+    chunks = []
+    offset = 0
+    idx = 0
+
+    while offset < nframes:
+        end = min(offset + chunk_frames, nframes)
+        chunk_raw = raw[offset * bytes_per_frame : end * bytes_per_frame]
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=f"_chunk{idx}.wav", dir=str(RECORDINGS_DIR), delete=False
+        )
+        with wave.open(tmp.name, "w") as out:
+            out.setnchannels(1)
+            out.setsampwidth(sampwidth)
+            out.setframerate(framerate)
+            out.writeframes(chunk_raw)
+        chunks.append(Path(tmp.name))
+        idx += 1
+        offset = end
+
+    return chunks
+
+
 # ── Transcription via Whisper ──────────────────────────────────────────────
 
+def _transcribe_chunk(audio_path: Path) -> str:
+    """Transcribe a single audio chunk (<= 25s mono WAV). Returns text or empty string."""
+    import requests
+    with open(audio_path, "rb") as f:
+        resp = requests.post(
+            f"{LITELLM_BASE}/audio/transcriptions",
+            headers={"Authorization": f"Bearer {LITELLM_KEY}"},
+            files={"file": (audio_path.name, f, "audio/wav")},
+            data={"model": WHISPER_MODEL},
+            timeout=120,
+        )
+    resp.raise_for_status()
+    return resp.json().get("text", "").strip()
+
+
 def transcribe_recording(audio_path: Path) -> str | None:
+    """Transcribe a recording: stereo->mono, chunk if needed, transcribe each chunk."""
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     transcript_path = TRANSCRIPTS_DIR / f"{audio_path.stem}.txt"
     if transcript_path.exists():
         return transcript_path.read_text()
 
     try:
-        import requests
-        with open(audio_path, "rb") as f:
-            resp = requests.post(
-                f"{LITELLM_BASE}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {LITELLM_KEY}"},
-                files={"file": (audio_path.name, f, "audio/wav")},
-                data={"model": WHISPER_MODEL},
-                timeout=180,
-            )
-        resp.raise_for_status()
-        text = resp.json().get("text", "").strip()
-        if text:
-            transcript_path.write_text(text)
-            print(f"[call-monitor] Transcribed {audio_path.stem}: {len(text)} chars")
+        # Step 1: Convert stereo to mono
+        mono_path = _stereo_to_mono(audio_path)
+
+        # Step 2: Split into chunks if > 25s
+        chunks = _chunk_audio(mono_path)
+        print(f"[call-monitor] Transcribing {audio_path.stem}: {len(chunks)} chunk(s)")
+
+        # Step 3: Transcribe each chunk
+        texts = []
+        for i, chunk in enumerate(chunks):
+            try:
+                text = _transcribe_chunk(chunk)
+                if text:
+                    texts.append(text)
+            except Exception as e:
+                print(f"[call-monitor] Chunk {i+1}/{len(chunks)} error: {e}", file=sys.stderr)
+            finally:
+                # Clean up temp chunk files (not the original or mono)
+                if chunk != mono_path and chunk != audio_path:
+                    chunk.unlink(missing_ok=True)
+
+        # Clean up mono file if we created one
+        if mono_path != audio_path:
+            mono_path.unlink(missing_ok=True)
+
+        full_text = " ".join(texts).strip()
+        if full_text:
+            transcript_path.write_text(full_text)
+            print(f"[call-monitor] Transcribed {audio_path.stem}: {len(full_text)} chars")
         else:
-            text = "(empty — possibly a very short or silent call)"
-            transcript_path.write_text(text)
-        return text
+            full_text = "(empty — possibly a very short or silent call)"
+            transcript_path.write_text(full_text)
+        return full_text
     except Exception as e:
         print(f"[call-monitor] Transcription error: {e}", file=sys.stderr)
         return None
@@ -335,7 +442,7 @@ def analyze_transcript(transcript: str, call_info: dict, recording: dict) -> dic
                 "model": LLM_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
-                "max_tokens": 4000,
+                "max_tokens": 8000,
             },
             timeout=120,
         )
@@ -356,6 +463,24 @@ def analyze_transcript(transcript: str, call_info: dict, recording: dict) -> dic
         return analysis
 
     except json.JSONDecodeError as e:
+        # Attempt to repair truncated JSON by closing open structures
+        repaired = content.rstrip()
+        # Count open braces/brackets
+        opens = repaired.count("{") - repaired.count("}")
+        open_brackets = repaired.count("[") - repaired.count("]")
+        # If inside a string value, close it
+        if repaired and repaired[-1] not in ']}",':
+            repaired += '"'
+        # Close open arrays then objects
+        repaired += "]" * max(0, open_brackets)
+        repaired += "}" * max(0, opens)
+        try:
+            analysis = json.loads(repaired)
+            analysis_path.write_text(json.dumps(analysis, indent=2))
+            print(f"[call-monitor] Analysis complete for {recording['sid']} (repaired truncated JSON)")
+            return analysis
+        except json.JSONDecodeError:
+            pass
         print(f"[call-monitor] LLM returned invalid JSON: {e}", file=sys.stderr)
         print(f"[call-monitor] Raw content: {content[:500]}", file=sys.stderr)
         return None
@@ -475,7 +600,7 @@ def email_project_specs(analysis: dict, recording_sid: str) -> bool:
         result = ms.send_html_email(
             to=OWNER_EMAIL,
             subject=subject,
-            html_content=html,
+            html_body=html,
         )
         print(f"[call-monitor] Emailed project spec: {project_name}")
         return result
